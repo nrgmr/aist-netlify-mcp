@@ -7,6 +7,7 @@ import { getPackageVersion } from "../../src/utils/version.ts";
 import { z } from "zod";
 import { checkCompatibility } from "../../src/utils/compatibility.ts";
 import { bindTools } from "../../src/tools/index.ts";
+import { registerClaudeDesignImportTool } from "../../src/tools/design-import/import-claude-design.ts";
 import { userIsAuthenticated, UNAUTHED_ERROR_PREFIX } from "../../src/utils/api-networking.ts";
 import { debugLog, maskToken } from "./mcp-server/logging.ts";
 import {Config} from "@netlify/functions";
@@ -159,6 +160,10 @@ async function handleMCPPost(req: Request) {
       });
     }
   );
+
+  // Standalone top-level tool (not part of the domain selector) so Claude Design
+  // can discover it by its exact name and list Netlify as a "Send to" destination.
+  registerClaudeDesignImportTool(server, req);
 
   try {
     await bindTools(server, req, verboseMode);
