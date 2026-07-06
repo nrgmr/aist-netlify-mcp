@@ -25,10 +25,12 @@ test('redactSensitive walks arrays and deep objects', () => {
   assert.equal(out[1].access_token, '[redacted]');
 });
 
-test('redactSensitive survives maliciously deep nesting instead of blowing the stack', () => {
-  const deep = JSON.parse('{"a":'.repeat(100_000) + '1' + '}'.repeat(100_000));
+test('redactSensitive truncates past its depth cap instead of recursing without bound', () => {
+  // Build the fixture iteratively (not via JSON.parse, whose own recursive
+  // parser can overflow first and mask what we mean to test) just past the cap.
+  let deep: any = 1;
+  for (let i = 0; i < 100; i++) deep = { a: deep };
   const out = redactSensitive(deep) as any;
-  // walks until the cap, then truncates
   let node = out;
   while (node && typeof node === 'object') node = node.a;
   assert.equal(node, '[redacted: nesting too deep]');
