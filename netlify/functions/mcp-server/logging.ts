@@ -61,16 +61,25 @@ const SENSITIVE_BODY_FIELDS = new Set([
 // sweep misses them. `code` is redacted only when it's a string — the string form
 // is an OAuth authorization code, while the numeric form is a JSON-RPC error code
 // that logs need to keep.
-export function redactSensitive<T>(value: T): T {
+//
+// The depth cap is load-bearing: this runs on attacker-controlled bodies in the
+// request path, and JSON.parse happily produces values deep enough to blow the
+// recursion stack. No legitimate MCP payload comes anywhere near the cap.
+const MAX_REDACT_DEPTH = 32;
+
+export function redactSensitive<T>(value: T, depth = 0): T {
+  if (depth >= MAX_REDACT_DEPTH) {
+    return '[redacted: nesting too deep]' as T;
+  }
   if (Array.isArray(value)) {
-    return value.map(redactSensitive) as T;
+    return value.map((entry) => redactSensitive(entry, depth + 1)) as T;
   }
   if (value && typeof value === 'object') {
     return Object.fromEntries(
       Object.entries(value as Record<string, unknown>).map(([key, entry]) =>
         SENSITIVE_BODY_FIELDS.has(key) && (key !== 'code' || typeof entry === 'string')
           ? [key, '[redacted]']
-          : [key, redactSensitive(entry)],
+          : [key, redactSensitive(entry, depth + 1)],
       ),
     ) as T;
   }
@@ -87,8 +96,13 @@ export function safeBodySummary(body: string | null | undefined): Record<string,
   try {
     parsed = JSON.parse(body);
   } catch {
-    // not JSON — fall back to form-encoded (URLSearchParams never throws)
-    parsed = Object.fromEntries(new URLSearchParams(body));
+    // Not JSON — accept the URLSearchParams fallback only when the keys look
+    // like real form fields. Anything else (truncated JSON, plain text) would
+    // land verbatim in the parsed object's KEYS, where key-name redaction
+    // can't catch a secret, so it must fall through to `unparseable`.
+    const form = Object.fromEntries(new URLSearchParams(body));
+    const keys = Object.keys(form);
+    parsed = keys.length > 0 && keys.every((key) => /^[\w.-]{1,64}$/.test(key)) ? form : null;
   }
 
   if (!parsed || typeof parsed !== 'object') {

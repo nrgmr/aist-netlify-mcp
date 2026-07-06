@@ -10,7 +10,7 @@ import { bindTools } from "../../src/tools/index.ts";
 import { registerClaudeDesignImportTool } from "../../src/tools/design-import/import-claude-design.ts";
 import { userIsAuthenticated, UNAUTHED_ERROR_PREFIX } from "../../src/utils/api-networking.ts";
 import { isClaudeMCPClient } from "../../src/utils/client-detection.ts";
-import { debugLog, maskToken, redactSensitive } from "./mcp-server/logging.ts";
+import { debugLog, isVerboseLogging, maskToken, redactSensitive } from "./mcp-server/logging.ts";
 import {Config} from "@netlify/functions";
 
 // Netlify serverless function handler
@@ -89,30 +89,35 @@ async function handleMCPPost(req: Request) {
     return jsonRpcError(400, -32700, 'Parse error: invalid JSON body');
   }
 
-  debugLog('mcp post body', { method: body?.method, id: body?.id, params: redactSensitive(body?.params) });
+  // Guarded here, not just inside debugLog: building these snapshots walks the
+  // whole (attacker-controlled, pre-auth) body and header set, work that must
+  // not run per-request in steady state.
+  if (isVerboseLogging()) {
+    debugLog('mcp post body', { method: body?.method, id: body?.id, params: redactSensitive(body?.params) });
 
-  // Request headers relevant to StreamableHTTP/MCP negotiation. `accept` must
-  // include both application/json and text/event-stream or the transport rejects
-  // the request; session/protocol headers help correlate the handshake.
-  debugLog('mcp post request', {
-    method: body?.method,
-    id: body?.id,
-    accept: req.headers.get('accept'),
-    contentType: req.headers.get('content-type'),
-    mcpSessionId: req.headers.get('mcp-session-id'),
-    mcpProtocolVersion: req.headers.get('mcp-protocol-version'),
-    userAgent: req.headers.get('user-agent'),
-    origin: req.headers.get('origin'),
-    auth: maskToken(req.headers.get('Authorization')),
-    clientInfoName: body?.params?.clientInfo?.name,
-    // Full header dump (auth values masked) to identify what different MCP
-    // clients actually send — the design-tool gating keys off these signals.
-    headers: Object.fromEntries(
-      [...req.headers.entries()].map(([k, v]) =>
-        /authorization|cookie/i.test(k) ? [k, maskToken(v)] : [k, v],
+    // Request headers relevant to StreamableHTTP/MCP negotiation. `accept` must
+    // include both application/json and text/event-stream or the transport rejects
+    // the request; session/protocol headers help correlate the handshake.
+    debugLog('mcp post request', {
+      method: body?.method,
+      id: body?.id,
+      accept: req.headers.get('accept'),
+      contentType: req.headers.get('content-type'),
+      mcpSessionId: req.headers.get('mcp-session-id'),
+      mcpProtocolVersion: req.headers.get('mcp-protocol-version'),
+      userAgent: req.headers.get('user-agent'),
+      origin: req.headers.get('origin'),
+      auth: maskToken(req.headers.get('Authorization')),
+      clientInfoName: body?.params?.clientInfo?.name,
+      // Full header dump (auth values masked) to identify what different MCP
+      // clients actually send — the design-tool gating keys off these signals.
+      headers: Object.fromEntries(
+        [...req.headers.entries()].map(([k, v]) =>
+          /authorization|cookie/i.test(k) ? [k, maskToken(v)] : [k, v],
+        ),
       ),
-    ),
-  });
+    });
+  }
 
   // Check for verbose mode via query parameter
   const url = new URL(req.url);
