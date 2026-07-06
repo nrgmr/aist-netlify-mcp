@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { slugify, encodeJob, decodeJob, projectMarker, importSiteName } from './job-utils.ts';
+import { slugify, encodeJob, decodeJob, projectMarker, importSiteName, fallbackImportSiteName } from './job-utils.ts';
 
 test('slugify returns undefined for missing or empty titles', () => {
   assert.equal(slugify(undefined), undefined);
@@ -38,6 +38,13 @@ test('importSiteName combines title slug with the project marker', () => {
 test('importSiteName stays within the 63-char subdomain limit', () => {
   const name = importSiteName('x'.repeat(100), 'p123')!;
   assert.ok(name.length <= 63, `name is ${name.length} chars`);
+});
+
+test('fallbackImportSiteName keeps the marker so re-send lookups still match', () => {
+  const name = fallbackImportSiteName('p123', 'a1b2c3');
+  assert.equal(name, `${projectMarker('p123')}-a1b2c3`);
+  assert.ok(name.includes(projectMarker('p123')));
+  assert.notEqual(name, fallbackImportSiteName('p123', 'z9y8x7'));
 });
 
 test('encodeJob/decodeJob round-trips siteId and deployId', () => {

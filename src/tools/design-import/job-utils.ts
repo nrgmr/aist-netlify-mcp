@@ -21,6 +21,14 @@ export function importSiteName(title?: string, projectId?: string): string | und
   return slug ? `${slug}-${marker}` : marker;
 }
 
+// Fallback name for when the primary name is already taken (subdomains are
+// globally unique — e.g. the same design project imported from a different
+// Netlify account). It keeps the marker so a re-send can still find this site
+// via the name lookup; the suffix restores uniqueness.
+export function fallbackImportSiteName(projectId: string, suffix: string): string {
+  return `${projectMarker(projectId)}-${suffix}`;
+}
+
 export function slugify(title?: string): string | undefined {
   if (!title) return undefined;
   const slug = title

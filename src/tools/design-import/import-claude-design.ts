@@ -14,7 +14,7 @@ import {
 } from '../../utils/api-networking.js';
 import { zipAndBuild } from '../deploy-tools/deploy-site.js';
 import { appendErrorToLog } from '../../utils/logging.js';
-import { decodeJob, encodeJob, importSiteName, projectMarker } from './job-utils.js';
+import { decodeJob, encodeJob, fallbackImportSiteName, importSiteName, projectMarker } from './job-utils.js';
 
 // Claude Design discovers export destinations by this literal tool name.
 // It MUST match exactly or Netlify will not appear in the "Send to…" menu.
@@ -83,7 +83,7 @@ export async function runClaudeDesignImport(
   const existingSite = projectId ? await findSiteForProject(projectId, request) : undefined;
   const site =
     existingSite ??
-    (await createImportSite(importSiteName(title, projectId), { account_slug, password }, request));
+    (await createImportSite(siteNameCandidates(title, projectId), { account_slug, password }, request));
   if (!existingSite && projectId) {
     await recordProjectIdOnSite(site.id, projectId, request);
   }
@@ -177,10 +177,21 @@ async function recordProjectIdOnSite(siteId: string, projectId: string, request?
   }
 }
 
+// Names to try when creating the site, in order. When a project id is present,
+// every candidate keeps the marker: a Netlify-generated fallback name would
+// orphan the site from future re-send lookups (which match the marker in the
+// name), silently breaking idempotency for that project.
+function siteNameCandidates(title?: string, projectId?: string): string[] {
+  const primary = importSiteName(title, projectId);
+  if (!primary) return [];
+  if (!projectId) return [primary];
+  return [primary, fallbackImportSiteName(projectId, randomUUID().slice(0, 6))];
+}
+
 class SiteNameTakenError extends Error {}
 
 async function createImportSite(
-  name: string | undefined,
+  nameCandidates: string[],
   { account_slug, password }: { account_slug?: string; password?: string },
   request?: Request,
 ): Promise<NetlifySite> {
@@ -212,9 +223,9 @@ async function createImportSite(
     throw new Error(`failed to create site (${response.status})${detail ? `: ${detail.slice(0, 300)}` : ''}`);
   };
 
-  // Site subdomains are globally unique. If the title-derived name collides,
-  // fall back to a Netlify-generated name so the import still succeeds.
-  if (name) {
+  // Site subdomains are globally unique. Try each candidate in order; if all
+  // are taken, let Netlify generate a name so the import still succeeds.
+  for (const name of nameCandidates) {
     try {
       return await attempt({ name });
     } catch (error) {
