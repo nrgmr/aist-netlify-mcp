@@ -56,9 +56,30 @@ const SENSITIVE_BODY_FIELDS = new Set([
   'registration_access_token',
 ]);
 
+// Deep-redacts sensitive fields anywhere in a parsed JSON value. Depth matters:
+// MCP tool-call bodies nest secrets (params.arguments.password), so a top-level
+// sweep misses them. `code` is redacted only when it's a string — the string form
+// is an OAuth authorization code, while the numeric form is a JSON-RPC error code
+// that logs need to keep.
+export function redactSensitive<T>(value: T): T {
+  if (Array.isArray(value)) {
+    return value.map(redactSensitive) as T;
+  }
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(
+      Object.entries(value as Record<string, unknown>).map(([key, entry]) =>
+        SENSITIVE_BODY_FIELDS.has(key) && (key !== 'code' || typeof entry === 'string')
+          ? [key, '[redacted]']
+          : [key, redactSensitive(entry)],
+      ),
+    ) as T;
+  }
+  return value;
+}
+
 // Produce a log-safe view of a request body: parses JSON or form-encoded
-// payloads, redacts secrets, and surfaces the rest (including `scope`) so we can
-// debug failures without leaking credentials.
+// payloads, redacts secrets at any depth, and surfaces the rest (including
+// `scope`) so we can debug failures without leaking credentials.
 export function safeBodySummary(body: string | null | undefined): Record<string, unknown> {
   if (!body) return { empty: true };
 
@@ -74,9 +95,5 @@ export function safeBodySummary(body: string | null | undefined): Record<string,
     return { unparseable: true, length: body.length };
   }
 
-  const safe: Record<string, unknown> = {};
-  for (const [key, value] of Object.entries(parsed as Record<string, unknown>)) {
-    safe[key] = SENSITIVE_BODY_FIELDS.has(key) ? '[redacted]' : value;
-  }
-  return safe;
+  return redactSensitive(parsed as Record<string, unknown>);
 }

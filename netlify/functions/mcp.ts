@@ -10,7 +10,7 @@ import { bindTools } from "../../src/tools/index.ts";
 import { registerClaudeDesignImportTool } from "../../src/tools/design-import/import-claude-design.ts";
 import { userIsAuthenticated, UNAUTHED_ERROR_PREFIX } from "../../src/utils/api-networking.ts";
 import { isClaudeMCPClient } from "../../src/utils/client-detection.ts";
-import { debugLog, maskToken } from "./mcp-server/logging.ts";
+import { debugLog, maskToken, redactSensitive } from "./mcp-server/logging.ts";
 import {Config} from "@netlify/functions";
 
 // Netlify serverless function handler
@@ -89,7 +89,7 @@ async function handleMCPPost(req: Request) {
     return jsonRpcError(400, -32700, 'Parse error: invalid JSON body');
   }
 
-  debugLog('mcp post body', { method: body?.method, id: body?.id, params: body?.params });
+  debugLog('mcp post body', { method: body?.method, id: body?.id, params: redactSensitive(body?.params) });
 
   // Request headers relevant to StreamableHTTP/MCP negotiation. `accept` must
   // include both application/json and text/event-stream or the transport rejects

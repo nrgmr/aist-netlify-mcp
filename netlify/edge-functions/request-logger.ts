@@ -1,5 +1,5 @@
 import type { Context } from '@netlify/edge-functions';
-import { isVerboseLogging, maskToken } from '../functions/mcp-server/logging.ts';
+import { isVerboseLogging, maskToken, safeBodySummary } from '../functions/mcp-server/logging.ts';
 
 // Catch-all request/response logger. Runs in front of every request (declared
 // first in netlify.toml so it wraps the proxy edge function and all regular
@@ -25,11 +25,13 @@ export default async (request: Request, context: Context) => {
   const label = `${request.method} ${url.pathname}`;
 
   // Read the request body via a clone so the original is left intact for
-  // downstream handlers (context.next()).
+  // downstream handlers (context.next()). Bodies carry secrets (tool-call
+  // password args, OAuth codes), so they are redacted before logging, then
+  // truncated — redact-first so truncation can never split around a secret.
   let reqBody = '';
   try {
     if (request.body) {
-      reqBody = truncate(await request.clone().text());
+      reqBody = truncate(JSON.stringify(safeBodySummary(await request.clone().text())));
     }
   } catch (err) {
     reqBody = `<unreadable request body: ${err instanceof Error ? err.message : String(err)}>`;
