@@ -76,12 +76,16 @@ test('isBlockedFetchHost blocks internal destinations, allows public ones', () =
   }
 });
 
-test('isPrivateAddress classifies resolved IPs, including IPv4-mapped IPv6', () => {
-  for (const ip of ['127.0.0.1', '10.1.2.3', '169.254.169.254', '172.31.255.255',
-    '192.168.0.1', '::1', 'fe80::1', 'fc00::1', '::ffff:127.0.0.1', '::ffff:10.0.0.1']) {
+test('isPrivateAddress classifies resolved IPs, including hex IPv4-mapped IPv6', () => {
+  for (const ip of ['127.0.0.1', '10.1.2.3', '169.254.169.254', '172.31.255.255', '192.168.0.1',
+    '::1', '::', 'fe80::1', 'fea0::1', 'febf::1', 'fc00::1', 'fd00::1',
+    // IPv4-mapped in the hex form new URL() actually produces:
+    '::ffff:7f00:1', '::ffff:a9fe:a9fe', '::ffff:0a00:0001', '::ffff:127.0.0.1',
+    'fe80::1%eth0']) {
     assert.ok(isPrivateAddress(ip), `${ip} should be private`);
   }
-  for (const ip of ['8.8.8.8', '1.1.1.1', '172.15.0.1', '2606:4700::1', '::ffff:8.8.8.8']) {
+  for (const ip of ['8.8.8.8', '1.1.1.1', '172.15.0.1', '172.32.0.1',
+    '2606:4700::1', '2001:db8::1', '::ffff:8.8.8.8', '::ffff:0808:0808']) {
     assert.ok(!isPrivateAddress(ip), `${ip} should be public`);
   }
 });

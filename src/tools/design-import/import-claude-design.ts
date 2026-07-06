@@ -123,17 +123,45 @@ async function fetchDesignHtml(url: string): Promise<string> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
   try {
-    const resp = await fetch(target, { signal: controller.signal, headers: { 'user-agent': 'netlify-mcp' } });
+    const resp = await fetchFollowingRedirects(target, controller);
     if (!resp.ok) {
       throw new Error(`could not fetch design from url (status ${resp.status})`);
     }
-    // Re-check after redirects: a public URL can 30x into an internal one.
-    await assertPublicHost(new URL(resp.url).hostname);
-
     return await readBodyWithCap(resp, controller);
   } finally {
     clearTimeout(timeout);
   }
+}
+
+// Follows redirects manually so each hop's host is validated BEFORE the request
+// fires. Default fetch follows 30x transparently, which would let a public URL
+// redirect into an internal host and complete that request (blind SSRF) before a
+// post-hoc resp.url check could run.
+const MAX_REDIRECTS = 5;
+
+async function fetchFollowingRedirects(start: URL, controller: AbortController): Promise<Response> {
+  let url = start;
+  for (let hop = 0; hop <= MAX_REDIRECTS; hop++) {
+    await assertPublicHost(url.hostname);
+    const resp = await fetch(url, {
+      redirect: 'manual',
+      signal: controller.signal,
+      headers: { 'user-agent': 'netlify-mcp' },
+    });
+    if (resp.status < 300 || resp.status >= 400) {
+      return resp;
+    }
+    const location = resp.headers.get('location');
+    if (!location) {
+      return resp;
+    }
+    const next = new URL(location, url);
+    if (next.protocol !== 'https:') {
+      throw new Error('url redirected to a non-https location');
+    }
+    url = next;
+  }
+  throw new Error('too many redirects');
 }
 
 // Blocks a host that is private by name OR resolves to a private address. The DNS
