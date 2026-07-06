@@ -9,9 +9,12 @@ import { checkCompatibility } from "../../src/utils/compatibility.ts";
 import { bindTools } from "../../src/tools/index.ts";
 import { registerClaudeDesignImportTool } from "../../src/tools/design-import/import-claude-design.ts";
 import { userIsAuthenticated, UNAUTHED_ERROR_PREFIX } from "../../src/utils/api-networking.ts";
-import { isClaudeMCPClient } from "../../src/utils/client-detection.ts";
 import { debugLog, maskToken } from "./mcp-server/logging.ts";
 import {Config} from "@netlify/functions";
+
+// Claude Design's connector points at /mcp?client=claude-design; the design import
+// tool is registered only for that marker, so it never appears for other clients.
+const CLAUDE_DESIGN_CLIENT = 'claude-design';
 
 // Netlify serverless function handler
 export default async (req: Request) => {
@@ -102,16 +105,12 @@ async function handleMCPPost(req: Request) {
     mcpSessionId: req.headers.get('mcp-session-id'),
     mcpProtocolVersion: req.headers.get('mcp-protocol-version'),
     userAgent: req.headers.get('user-agent'),
+    // origin/referer identify which surface a request comes from; kept for
+    // diagnosing client behaviour when verbose logging is enabled.
     origin: req.headers.get('origin'),
+    referer: req.headers.get('referer'),
     auth: maskToken(req.headers.get('Authorization')),
     clientInfoName: body?.params?.clientInfo?.name,
-    // Full header dump (auth values masked) to identify what different MCP
-    // clients actually send — the design-tool gating keys off these signals.
-    headers: Object.fromEntries(
-      [...req.headers.entries()].map(([k, v]) =>
-        /authorization|cookie/i.test(k) ? [k, maskToken(v)] : [k, v],
-      ),
-    ),
   });
 
   // Check for verbose mode via query parameter
@@ -172,12 +171,12 @@ async function handleMCPPost(req: Request) {
 
   // Standalone top-level tool (not part of the domain selector) so Claude Design
   // can discover it by its exact name and list Netlify as a "Send to" destination.
-  // Claude Design is its only consumer, so it is registered for Claude clients
-  // alone — every other agent (Codex, Gemini, editors, generic MCP clients) gets a
-  // tools/list without it. The check is per-request because this server is
-  // stateless: clientInfo only arrives on initialize, so the user-agent is the
-  // signal that persists across tools/list and tools/call.
-  if (isClaudeMCPClient(req, body)) {
+  // Gated fail-closed on an explicit ?client=claude-design marker on the MCP URL,
+  // which Claude Design's connector is configured with. Every other surface
+  // (Claude Code, claude.ai chat, other agents) hits the plain /mcp URL and never
+  // sees the tool. This is a per-request URL check, so it holds on tools/list and
+  // tools/call alike without relying on a user-agent or stateful session.
+  if (url.searchParams.get('client') === CLAUDE_DESIGN_CLIENT) {
     registerClaudeDesignImportTool(server, req);
   }
 
