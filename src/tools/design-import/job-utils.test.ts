@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { slugify, encodeJob, decodeJob } from './job-utils.ts';
+import { slugify, encodeJob, decodeJob, projectMarker, importSiteName } from './job-utils.ts';
 
 test('slugify returns undefined for missing or empty titles', () => {
   assert.equal(slugify(undefined), undefined);
@@ -18,6 +18,26 @@ test('slugify caps length at 40 chars with no trailing hyphen', () => {
   const out = slugify('a'.repeat(60))!;
   assert.ok(out.length <= 40);
   assert.doesNotMatch(out, /-$/);
+});
+
+test('projectMarker is deterministic, url-safe, and does not expose the project id', () => {
+  const marker = projectMarker('p1782841610658559');
+  assert.equal(marker, projectMarker('p1782841610658559'));
+  assert.match(marker, /^cd-[0-9a-f]{10}$/);
+  assert.ok(!marker.includes('1782841610658559'));
+  assert.notEqual(marker, projectMarker('p999'));
+});
+
+test('importSiteName combines title slug with the project marker', () => {
+  assert.equal(importSiteName('My Cool Design'), 'my-cool-design');
+  assert.equal(importSiteName('My Cool Design', 'p123'), `my-cool-design-${projectMarker('p123')}`);
+  assert.equal(importSiteName(undefined, 'p123'), projectMarker('p123'));
+  assert.equal(importSiteName(undefined, undefined), undefined);
+});
+
+test('importSiteName stays within the 63-char subdomain limit', () => {
+  const name = importSiteName('x'.repeat(100), 'p123')!;
+  assert.ok(name.length <= 63, `name is ${name.length} chars`);
 });
 
 test('encodeJob/decodeJob round-trips siteId and deployId', () => {

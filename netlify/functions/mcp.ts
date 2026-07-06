@@ -9,6 +9,7 @@ import { checkCompatibility } from "../../src/utils/compatibility.ts";
 import { bindTools } from "../../src/tools/index.ts";
 import { registerClaudeDesignImportTool } from "../../src/tools/design-import/import-claude-design.ts";
 import { userIsAuthenticated, UNAUTHED_ERROR_PREFIX } from "../../src/utils/api-networking.ts";
+import { isClaudeMCPClient } from "../../src/utils/client-detection.ts";
 import { debugLog, maskToken } from "./mcp-server/logging.ts";
 import {Config} from "@netlify/functions";
 
@@ -103,6 +104,14 @@ async function handleMCPPost(req: Request) {
     userAgent: req.headers.get('user-agent'),
     origin: req.headers.get('origin'),
     auth: maskToken(req.headers.get('Authorization')),
+    clientInfoName: body?.params?.clientInfo?.name,
+    // Full header dump (auth values masked) to identify what different MCP
+    // clients actually send — the design-tool gating keys off these signals.
+    headers: Object.fromEntries(
+      [...req.headers.entries()].map(([k, v]) =>
+        /authorization|cookie/i.test(k) ? [k, maskToken(v)] : [k, v],
+      ),
+    ),
   });
 
   // Check for verbose mode via query parameter
@@ -163,7 +172,14 @@ async function handleMCPPost(req: Request) {
 
   // Standalone top-level tool (not part of the domain selector) so Claude Design
   // can discover it by its exact name and list Netlify as a "Send to" destination.
-  registerClaudeDesignImportTool(server, req);
+  // Claude Design is its only consumer, so it is registered for Claude clients
+  // alone — every other agent (Codex, Gemini, editors, generic MCP clients) gets a
+  // tools/list without it. The check is per-request because this server is
+  // stateless: clientInfo only arrives on initialize, so the user-agent is the
+  // signal that persists across tools/list and tools/call.
+  if (isClaudeMCPClient(req, body)) {
+    registerClaudeDesignImportTool(server, req);
+  }
 
   try {
     await bindTools(server, req, verboseMode);

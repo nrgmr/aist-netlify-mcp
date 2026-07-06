@@ -6,6 +6,7 @@ import { promises as fs } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 
 import {
+  authenticatedFetch,
   getAPIJSONResult,
   getNetlifyAccessToken,
   NetlifyUnauthError,
@@ -13,7 +14,7 @@ import {
 } from '../../utils/api-networking.js';
 import { zipAndBuild } from '../deploy-tools/deploy-site.js';
 import { appendErrorToLog } from '../../utils/logging.js';
-import { decodeJob, encodeJob, slugify } from './job-utils.js';
+import { decodeJob, encodeJob, importSiteName, projectMarker } from './job-utils.js';
 
 // Claude Design discovers export destinations by this literal tool name.
 // It MUST match exactly or Netlify will not appear in the "Send to…" menu.
@@ -27,31 +28,68 @@ const FETCH_TIMEOUT_MS = 60_000;
 // caps memory use while staying well above a realistic design size.
 const MAX_HTML_BYTES = 30 * 1024 * 1024;
 
+// Tags imported sites so Netlify attributes them to Claude Design (drives the
+// "created via" label) instead of falling through to the default "Netlify Drop".
+const CREATED_VIA = 'claude_design';
+
 const importInputSchema = {
   url: z
     .string()
     .url()
     .describe('Public HTTPS URL to the design file. Valid for a short time. Fetched server-side.'),
   title: z.string().optional().describe('Suggested title for the imported design.'),
+  claude_design_project_id: z
+    .string()
+    .optional()
+    .describe(
+      'Stable Claude Design project id. When provided, re-sending the same project updates its existing Netlify site in place instead of creating a new site each time.',
+    ),
+  account_slug: z
+    .string()
+    .optional()
+    .describe(
+      'Optional Netlify team (account) slug to create the site under, e.g. "acme-team". Omit to use your default team.',
+    ),
+  password: z
+    .string()
+    .optional()
+    .describe(
+      'Optional password to protect the imported site. Applied when the site is first created; requires a plan with site password protection. If unavailable the import fails with a clear error.',
+    ),
 };
 
 const statusInputSchema = {
   job_id: z.string().describe('Job id returned by import-claude-design-from-url.'),
 };
 
-type ImportResult = { site: NetlifySite; deployId: string; jobId: string };
+type ImportInput = {
+  url: string;
+  title?: string;
+  account_slug?: string;
+  password?: string;
+  claude_design_project_id?: string;
+};
+type ImportResult = { site: NetlifySite; deployId: string; jobId: string; updatedExistingSite: boolean };
 type StatusResult = { status: 'processing' | 'done' | 'failed'; design_url?: string; state: string };
 
 // === core logic (pure-ish, exported for tests + local verification) ===
 
 export async function runClaudeDesignImport(
-  { url, title }: { url: string; title?: string },
+  { url, title, account_slug, password, claude_design_project_id: projectId }: ImportInput,
   request?: Request,
 ): Promise<ImportResult> {
   const html = await fetchDesignHtml(url);
-  const site = await createImportSite(slugify(title), request);
+
+  const existingSite = projectId ? await findSiteForProject(projectId, request) : undefined;
+  const site =
+    existingSite ??
+    (await createImportSite(importSiteName(title, projectId), { account_slug, password }, request));
+  if (!existingSite && projectId) {
+    await recordProjectIdOnSite(site.id, projectId, request);
+  }
+
   const deployId = await deployHtmlToSite(html, site.id, request);
-  return { site, deployId, jobId: encodeJob(site.id, deployId) };
+  return { site, deployId, jobId: encodeJob(site.id, deployId), updatedExistingSite: !!existingSite };
 }
 
 export async function getClaudeDesignImportStatus(
@@ -94,36 +132,96 @@ async function fetchDesignHtml(url: string): Promise<string> {
   }
 }
 
-class SiteNameTakenError extends Error {}
-
-async function createImportSite(name: string | undefined, request?: Request): Promise<NetlifySite> {
-  const create = (body: object): Promise<NetlifySite> =>
-    getAPIJSONResult(
-      '/api/v1/sites',
-      { method: 'POST', body: JSON.stringify(body) },
-      {
-        failureCallback: (response) => {
-          // 422 means the chosen name is already taken; anything else is a real failure.
-          if (response.status === 422) {
-            throw new SiteNameTakenError();
-          }
-          throw new Error(`failed to create site: ${response.status}`);
-        },
-      },
+// Finds the site a previous send of this project created: a name-filtered lookup
+// on the project marker, confirmed against the site's stored metadata so a
+// coincidental name match can never cause a deploy onto an unrelated site.
+// Best-effort — any lookup failure falls back to creating a fresh site.
+async function findSiteForProject(projectId: string, request?: Request): Promise<NetlifySite | undefined> {
+  const marker = projectMarker(projectId);
+  try {
+    const response = await authenticatedFetch(
+      `/api/v1/sites?name=${encodeURIComponent(marker)}&filter=all`,
+      {},
       request,
     );
+    if (!response.ok) return undefined;
+
+    const sites = (await response.json()) as NetlifySite[];
+    for (const site of sites.filter((site) => site.name?.includes(marker))) {
+      const meta = await authenticatedFetch(`/api/v1/sites/${site.id}/metadata`, {}, request);
+      if (!meta.ok) continue;
+      const metadata = (await meta.json()) as Record<string, unknown>;
+      if (metadata?.claude_design_project_id === projectId) return site;
+    }
+  } catch (error) {
+    appendErrorToLog(`Claude Design project lookup failed (falling back to new site): ${error}`);
+  }
+  return undefined;
+}
+
+// Stores the project id on the new site so future sends can verify the match.
+// Best-effort: a failure here degrades re-sends to creating a new site, which is
+// strictly better than failing an import that already succeeded.
+async function recordProjectIdOnSite(siteId: string, projectId: string, request?: Request): Promise<void> {
+  try {
+    const response = await authenticatedFetch(
+      `/api/v1/sites/${siteId}/metadata`,
+      { method: 'PUT', body: JSON.stringify({ claude_design_project_id: projectId }) },
+      request,
+    );
+    if (!response.ok) {
+      appendErrorToLog(`Failed to record Claude Design project id on site ${siteId} (${response.status})`);
+    }
+  } catch (error) {
+    appendErrorToLog(`Failed to record Claude Design project id on site ${siteId}: ${error}`);
+  }
+}
+
+class SiteNameTakenError extends Error {}
+
+async function createImportSite(
+  name: string | undefined,
+  { account_slug, password }: { account_slug?: string; password?: string },
+  request?: Request,
+): Promise<NetlifySite> {
+  // account_slug targets a specific team; the sites API reads it from the query
+  // string (params[:account_slug]), not the JSON body. Omitted -> user's default team.
+  const path = account_slug
+    ? `/api/v1/sites?account_slug=${encodeURIComponent(account_slug)}`
+    : '/api/v1/sites';
+
+  const attempt = async (extra: object): Promise<NetlifySite> => {
+    const body = { created_via: CREATED_VIA, ...(password ? { password } : {}), ...extra };
+    const response = await authenticatedFetch(path, { method: 'POST', body: JSON.stringify(body) }, request);
+
+    if (response.status === 401 && request) {
+      throw new NetlifyUnauthError();
+    }
+    if (response.ok) {
+      return (await response.json()) as NetlifySite;
+    }
+
+    // A 422 about the name/subdomain already being taken is retryable with an
+    // auto-generated name. Any other 422 (e.g. password protection or the
+    // requested team not available on this plan) is a real error — surface it
+    // rather than masking it as a name collision.
+    const detail = await response.text().catch(() => '');
+    if (response.status === 422 && /name|subdomain|already|taken/i.test(detail)) {
+      throw new SiteNameTakenError();
+    }
+    throw new Error(`failed to create site (${response.status})${detail ? `: ${detail.slice(0, 300)}` : ''}`);
+  };
 
   // Site subdomains are globally unique. If the title-derived name collides,
-  // fall back to a Netlify-generated name so the import still succeeds. Any other
-  // failure propagates rather than being masked by the fallback.
+  // fall back to a Netlify-generated name so the import still succeeds.
   if (name) {
     try {
-      return await create({ name });
+      return await attempt({ name });
     } catch (error) {
       if (!(error instanceof SiteNameTakenError)) throw error;
     }
   }
-  return await create({});
+  return await attempt({});
 }
 
 async function deployHtmlToSite(html: string, siteId: string, request?: Request): Promise<string> {
@@ -158,15 +256,17 @@ export function registerClaudeDesignImportTool(server: McpServer, remoteMCPReque
       inputSchema: importInputSchema,
       annotations: { readOnlyHint: false, destructiveHint: false },
     },
-    async ({ url, title }: { url: string; title?: string }) => {
+    async (input: ImportInput) => {
       const authError = await guardAuth(remoteMCPRequest);
       if (authError) return authError;
 
       try {
-        const { site, jobId } = await runClaudeDesignImport({ url, title }, remoteMCPRequest);
+        const { site, jobId, updatedExistingSite } = await runClaudeDesignImport(input, remoteMCPRequest);
         const liveUrl = site.ssl_url || site.url;
         const text = [
-          `Imported into Netlify: ${liveUrl}`,
+          updatedExistingSite
+            ? `Updated the existing Netlify site for this design: ${liveUrl}`
+            : `Imported into Netlify: ${liveUrl}`,
           `Manage in Netlify: ${site.admin_url}`,
           `The deploy is finalizing and the URL goes live momentarily. To confirm it is ready, call ${STATUS_TOOL_NAME} with job_id "${jobId}".`,
         ].join('\n');
