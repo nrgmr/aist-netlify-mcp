@@ -221,6 +221,27 @@ async function createImportSite(
   { account_slug, password }: { account_slug?: string; password?: string },
   request?: Request,
 ): Promise<NetlifySite> {
+  // account_slug is a best-effort hint. If it names an unknown/inaccessible team
+  // the create under that team fails; rather than fail the export, fall back to
+  // the user's default team. Auth failures still propagate — those are not a
+  // slug problem and must not be masked as one.
+  if (account_slug) {
+    try {
+      return await createUnderTeam(nameCandidates, account_slug, password, request);
+    } catch (error) {
+      if (error instanceof NetlifyUnauthError) throw error;
+      appendErrorToLog(`account_slug "${account_slug}" unusable, creating under default team: ${error}`);
+    }
+  }
+  return await createUnderTeam(nameCandidates, undefined, password, request);
+}
+
+async function createUnderTeam(
+  nameCandidates: string[],
+  account_slug: string | undefined,
+  password: string | undefined,
+  request?: Request,
+): Promise<NetlifySite> {
   // account_slug targets a specific team; the sites API reads it from the query
   // string (params[:account_slug]), not the JSON body. Omitted -> user's default team.
   const path = account_slug
