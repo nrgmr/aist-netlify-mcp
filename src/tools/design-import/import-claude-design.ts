@@ -14,7 +14,7 @@ import {
 } from '../../utils/api-networking.js';
 import { zipAndBuild } from '../deploy-tools/deploy-site.js';
 import { appendErrorToLog } from '../../utils/logging.js';
-import { decodeJob, encodeJob, fallbackImportSiteName, importSiteName, projectMarker } from './job-utils.js';
+import { decodeJob, encodeJob, fallbackImportSiteName, importSiteName, isBlockedFetchHost, projectMarker } from './job-utils.js';
 
 // Claude Design discovers export destinations by this literal tool name.
 // It MUST match exactly or Netlify will not appear in the "Send to…" menu.
@@ -105,31 +105,58 @@ export async function getClaudeDesignImportStatus(
 }
 
 async function fetchDesignHtml(url: string): Promise<string> {
-  if (!url.startsWith('https://')) {
+  let target: URL;
+  try {
+    target = new URL(url);
+  } catch {
+    throw new Error('url must be a valid https URL');
+  }
+  if (target.protocol !== 'https:') {
     throw new Error('url must be an https URL');
+  }
+  if (isBlockedFetchHost(target.hostname)) {
+    throw new Error('url host is not allowed');
   }
 
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
   try {
-    const resp = await fetch(url, { signal: controller.signal, headers: { 'user-agent': 'netlify-mcp' } });
+    const resp = await fetch(target, { signal: controller.signal, headers: { 'user-agent': 'netlify-mcp' } });
     if (!resp.ok) {
       throw new Error(`could not fetch design from url (status ${resp.status})`);
     }
-
-    const declaredSize = Number(resp.headers.get('content-length') || 0);
-    if (declaredSize > MAX_HTML_BYTES) {
-      throw new Error(`design exceeds the ${MAX_HTML_BYTES}-byte size limit`);
+    // Re-check the host after redirects: a public URL can 30x into an internal one.
+    if (isBlockedFetchHost(new URL(resp.url).hostname)) {
+      throw new Error('url host is not allowed');
     }
 
-    const html = await resp.text();
-    if (html.length > MAX_HTML_BYTES) {
-      throw new Error(`design exceeds the ${MAX_HTML_BYTES}-byte size limit`);
-    }
-    return html;
+    return await readBodyWithCap(resp, controller);
   } finally {
     clearTimeout(timeout);
   }
+}
+
+// Streams the body and aborts the moment the accumulated bytes exceed the cap, so
+// a missing/lying content-length or a slow-drip response cannot exhaust memory
+// before a post-hoc length check would run. Counts bytes, not UTF-16 code units.
+async function readBodyWithCap(resp: Response, controller: AbortController): Promise<string> {
+  const reader = resp.body?.getReader();
+  if (!reader) {
+    throw new Error('could not read design from url');
+  }
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.byteLength;
+    if (total > MAX_HTML_BYTES) {
+      controller.abort();
+      throw new Error(`design exceeds the ${MAX_HTML_BYTES}-byte size limit`);
+    }
+    chunks.push(value);
+  }
+  return Buffer.concat(chunks).toString('utf-8');
 }
 
 // Finds the site a previous send of this project created: a name-filtered lookup

@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { slugify, encodeJob, decodeJob, projectMarker, importSiteName, fallbackImportSiteName } from './job-utils.ts';
+import { slugify, encodeJob, decodeJob, projectMarker, importSiteName, fallbackImportSiteName, isBlockedFetchHost } from './job-utils.ts';
 
 test('slugify returns undefined for missing or empty titles', () => {
   assert.equal(slugify(undefined), undefined);
@@ -52,12 +52,26 @@ test('encodeJob/decodeJob round-trips siteId and deployId', () => {
   assert.deepEqual(decodeJob(jobId), { siteId: 'site-123', deployId: 'deploy-456' });
 });
 
-test('decodeJob preserves a deployId that itself contains a colon', () => {
-  const jobId = encodeJob('site-123', 'dep:loy:789');
-  assert.deepEqual(decodeJob(jobId), { siteId: 'site-123', deployId: 'dep:loy:789' });
-});
-
 test('decodeJob throws on a malformed job_id', () => {
   const garbage = Buffer.from('no-separator-here').toString('base64url');
   assert.throws(() => decodeJob(garbage), /invalid job_id/);
+});
+
+test('decodeJob rejects ids that could traverse the deploy API path', () => {
+  // deployId is interpolated into GET /api/v1/deploys/<deployId>; "../../user"
+  // would resolve to a different authenticated endpoint.
+  const traversal = encodeJob('site-123', '../../user');
+  assert.throws(() => decodeJob(traversal), /invalid job_id/);
+  const slashed = encodeJob('site-123', 'a/b');
+  assert.throws(() => decodeJob(slashed), /invalid job_id/);
+});
+
+test('isBlockedFetchHost blocks internal destinations, allows public ones', () => {
+  for (const h of ['localhost', 'app.local', 'svc.internal', '127.0.0.1', '10.0.0.5',
+    '169.254.169.254', '172.16.0.1', '192.168.1.1', '::1', 'fd00::1']) {
+    assert.ok(isBlockedFetchHost(h), `${h} should be blocked`);
+  }
+  for (const h of ['example.com', 'files.claude.ai', '8.8.8.8', '172.15.0.1', '172.32.0.1']) {
+    assert.ok(!isBlockedFetchHost(h), `${h} should be allowed`);
+  }
 });
