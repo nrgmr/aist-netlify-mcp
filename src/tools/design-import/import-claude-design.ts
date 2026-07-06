@@ -4,6 +4,8 @@ import path from 'node:path';
 import os from 'node:os';
 import { promises as fs } from 'node:fs';
 import { randomUUID } from 'node:crypto';
+import { lookup as dnsLookupCb } from 'node:dns';
+import { promisify } from 'node:util';
 
 import {
   authenticatedFetch,
@@ -14,7 +16,9 @@ import {
 } from '../../utils/api-networking.js';
 import { zipAndBuild } from '../deploy-tools/deploy-site.js';
 import { appendErrorToLog } from '../../utils/logging.js';
-import { decodeJob, encodeJob, fallbackImportSiteName, importSiteName, isBlockedFetchHost, projectMarker } from './job-utils.js';
+import { decodeJob, encodeJob, fallbackImportSiteName, importSiteName, isBlockedFetchHost, isPrivateAddress, projectMarker } from './job-utils.js';
+
+const dnsLookup = promisify(dnsLookupCb);
 
 // Claude Design discovers export destinations by this literal tool name.
 // It MUST match exactly or Netlify will not appear in the "Send to…" menu.
@@ -114,9 +118,7 @@ async function fetchDesignHtml(url: string): Promise<string> {
   if (target.protocol !== 'https:') {
     throw new Error('url must be an https URL');
   }
-  if (isBlockedFetchHost(target.hostname)) {
-    throw new Error('url host is not allowed');
-  }
+  await assertPublicHost(target.hostname);
 
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
@@ -125,14 +127,36 @@ async function fetchDesignHtml(url: string): Promise<string> {
     if (!resp.ok) {
       throw new Error(`could not fetch design from url (status ${resp.status})`);
     }
-    // Re-check the host after redirects: a public URL can 30x into an internal one.
-    if (isBlockedFetchHost(new URL(resp.url).hostname)) {
-      throw new Error('url host is not allowed');
-    }
+    // Re-check after redirects: a public URL can 30x into an internal one.
+    await assertPublicHost(new URL(resp.url).hostname);
 
     return await readBodyWithCap(resp, controller);
   } finally {
     clearTimeout(timeout);
+  }
+}
+
+// Blocks a host that is private by name OR resolves to a private address. The DNS
+// check closes the gap where a public hostname points at loopback/RFC1918/metadata
+// space. Residual: fetch() re-resolves at connect time, so a rebinding attacker
+// racing the TTL between this lookup and the connection is not covered — that needs
+// connect-time IP pinning (a custom dispatcher), out of scope here.
+async function assertPublicHost(hostname: string): Promise<void> {
+  if (isBlockedFetchHost(hostname)) {
+    throw new Error('url host is not allowed');
+  }
+  // Literal IPs are already fully classified by isBlockedFetchHost; only names resolve.
+  if (/^(\d{1,3}\.){3}\d{1,3}$/.test(hostname) || hostname.includes(':')) {
+    return;
+  }
+  let addresses: { address: string }[];
+  try {
+    addresses = await dnsLookup(hostname, { all: true });
+  } catch {
+    throw new Error('could not resolve url host');
+  }
+  if (addresses.some((entry) => isPrivateAddress(entry.address))) {
+    throw new Error('url host is not allowed');
   }
 }
 

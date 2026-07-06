@@ -64,18 +64,15 @@ export function decodeJob(jobId: string): { siteId: string; deployId: string } {
   return { siteId, deployId };
 }
 
-// Rejects destinations that are not publicly routable, so the server-side design
-// fetch cannot be pointed at loopback, link-local, or private-network hosts (a
-// crafted url or a redirect into an internal service). This blocks literal IPs
-// and obvious internal names; it does NOT resolve DNS, so a hostname that
-// resolves to a private address is not caught here.
-export function isBlockedFetchHost(hostname: string): boolean {
-  const host = hostname.toLowerCase().replace(/^\[|\]$/g, '');
-  if (host === 'localhost' || host.endsWith('.localhost') || host.endsWith('.local') || host.endsWith('.internal')) {
-    return true;
-  }
-  // IPv4 literal
-  const v4 = host.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+// Classifies a resolved IP address (literal, not a hostname) as non-publicly
+// routable: loopback, link-local (incl. the cloud metadata address), and private
+// / unique-local ranges. Used both for literal-IP hosts and for the addresses a
+// hostname resolves to.
+export function isPrivateAddress(ip: string): boolean {
+  const addr = ip.toLowerCase().replace(/^\[|\]$/g, '');
+  // IPv4-mapped IPv6 (::ffff:127.0.0.1) — classify on the embedded v4.
+  const mapped = addr.match(/^::ffff:(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$/);
+  const v4 = (mapped ? mapped[1] : addr).match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
   if (v4) {
     const [a, b] = v4.slice(1).map(Number);
     if (a === 10 || a === 127 || a === 0) return true;
@@ -85,8 +82,19 @@ export function isBlockedFetchHost(hostname: string): boolean {
     return false;
   }
   // IPv6 loopback / link-local / unique-local
-  if (host === '::1' || host.startsWith('fe80:') || host.startsWith('fc') || host.startsWith('fd')) {
+  return addr === '::1' || addr.startsWith('fe80:') || addr.startsWith('fc') || addr.startsWith('fd');
+}
+
+// Rejects destinations that are not publicly routable by their host STRING, so
+// the server-side design fetch cannot be pointed at loopback, link-local, or
+// private hosts via a literal IP or an obvious internal name. It does NOT resolve
+// DNS — a hostname resolving to a private address is caught by the resolver-based
+// check in the fetch path, not here.
+export function isBlockedFetchHost(hostname: string): boolean {
+  const host = hostname.toLowerCase().replace(/^\[|\]$/g, '');
+  if (host === 'localhost' || host.endsWith('.localhost') || host.endsWith('.local') || host.endsWith('.internal')) {
     return true;
   }
-  return false;
+  const isIpLiteral = /^(\d{1,3}\.){3}\d{1,3}$/.test(host) || host.includes(':');
+  return isIpLiteral && isPrivateAddress(host);
 }

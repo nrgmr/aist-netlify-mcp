@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { slugify, encodeJob, decodeJob, projectMarker, importSiteName, fallbackImportSiteName, isBlockedFetchHost } from './job-utils.ts';
+import { slugify, encodeJob, decodeJob, projectMarker, importSiteName, fallbackImportSiteName, isBlockedFetchHost, isPrivateAddress } from './job-utils.ts';
 
 test('slugify returns undefined for missing or empty titles', () => {
   assert.equal(slugify(undefined), undefined);
@@ -73,5 +73,15 @@ test('isBlockedFetchHost blocks internal destinations, allows public ones', () =
   }
   for (const h of ['example.com', 'files.claude.ai', '8.8.8.8', '172.15.0.1', '172.32.0.1']) {
     assert.ok(!isBlockedFetchHost(h), `${h} should be allowed`);
+  }
+});
+
+test('isPrivateAddress classifies resolved IPs, including IPv4-mapped IPv6', () => {
+  for (const ip of ['127.0.0.1', '10.1.2.3', '169.254.169.254', '172.31.255.255',
+    '192.168.0.1', '::1', 'fe80::1', 'fc00::1', '::ffff:127.0.0.1', '::ffff:10.0.0.1']) {
+    assert.ok(isPrivateAddress(ip), `${ip} should be private`);
+  }
+  for (const ip of ['8.8.8.8', '1.1.1.1', '172.15.0.1', '2606:4700::1', '::ffff:8.8.8.8']) {
+    assert.ok(!isPrivateAddress(ip), `${ip} should be public`);
   }
 });
