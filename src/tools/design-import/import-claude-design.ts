@@ -70,7 +70,13 @@ type ImportInput = {
   password?: string;
   claude_design_project_id?: string;
 };
-type ImportResult = { site: NetlifySite; deployId: string; jobId: string; updatedExistingSite: boolean };
+type ImportResult = {
+  site: NetlifySite;
+  deployId: string;
+  jobId: string;
+  updatedExistingSite: boolean;
+  teamNote?: string;
+};
 type StatusResult = { status: 'processing' | 'done' | 'failed'; design_url?: string; state: string };
 
 // === core logic (pure-ish, exported for tests + local verification) ===
@@ -82,15 +88,22 @@ export async function runClaudeDesignImport(
   const html = await fetchDesignHtml(url);
 
   const existingSite = projectId ? await findSiteForProject(projectId, request) : undefined;
+
+  // Resolve the requested team up front so a misspelled/unknown team lands in the
+  // default team with a clear note, rather than failing the deploy and leaving the
+  // caller stuck. Only relevant when creating a new site.
+  const { slug: resolvedSlug, note: teamNote } =
+    existingSite || !account_slug ? { slug: account_slug, note: undefined } : await resolveTeamSlug(account_slug, request);
+
   const site =
     existingSite ??
-    (await createImportSite(siteNameCandidates(title, projectId), { account_slug, password }, request));
+    (await createImportSite(siteNameCandidates(title, projectId), { account_slug: resolvedSlug, password }, request));
   if (!existingSite && projectId) {
     await recordProjectIdOnSite(site.id, projectId, request);
   }
 
   const deployId = await deployHtmlToSite(html, site.id, request);
-  return { site, deployId, jobId: encodeJob(site.id, deployId), updatedExistingSite: !!existingSite };
+  return { site, deployId, jobId: encodeJob(site.id, deployId), updatedExistingSite: !!existingSite, teamNote };
 }
 
 export async function getClaudeDesignImportStatus(
@@ -183,6 +196,34 @@ async function findSiteForProject(projectId: string, request?: Request): Promise
     appendErrorToLog(`Claude Design project lookup failed (falling back to new site): ${error}`);
   }
   return undefined;
+}
+
+// Resolves a caller-supplied team hint against the user's actual teams, matching
+// on slug or name (the caller may pass either). Returns the canonical slug when
+// found, or an empty slug plus an explanatory note when it isn't — so the deploy
+// goes to the default team and the caller is told, instead of the deploy failing.
+// If the team list can't be fetched, the hint is passed through and the create-time
+// fallback handles an unusable team.
+async function resolveTeamSlug(
+  requested: string,
+  request?: Request,
+): Promise<{ slug?: string; note?: string }> {
+  let teams: Array<{ slug?: string; name?: string }>;
+  try {
+    teams = (await getAPIJSONResult('/api/v1/accounts', {}, {}, request)) as typeof teams;
+  } catch {
+    return { slug: requested };
+  }
+
+  const wanted = requested.toLowerCase();
+  const match = teams.find((team) => team.slug?.toLowerCase() === wanted || team.name?.toLowerCase() === wanted);
+  if (match?.slug) {
+    return { slug: match.slug };
+  }
+  return {
+    slug: undefined,
+    note: `Team "${requested}" was not found in your Netlify teams, so the design was deployed to your default team. Tell me the exact team name if you want it moved.`,
+  };
 }
 
 // Stores the project id on the new site so future sends can verify the match.
@@ -319,7 +360,7 @@ export function registerClaudeDesignImportTool(server: McpServer, remoteMCPReque
       if (authError) return authError;
 
       try {
-        const { site, jobId, updatedExistingSite } = await runClaudeDesignImport(input, remoteMCPRequest);
+        const { site, jobId, updatedExistingSite, teamNote } = await runClaudeDesignImport(input, remoteMCPRequest);
         const liveUrl = site.ssl_url || site.url;
         const text = [
           updatedExistingSite
@@ -327,6 +368,7 @@ export function registerClaudeDesignImportTool(server: McpServer, remoteMCPReque
             : `Imported into Netlify: ${liveUrl}`,
           `Manage in Netlify: ${site.admin_url}`,
           `The deploy is finalizing and the URL goes live momentarily. To confirm it is ready, call ${STATUS_TOOL_NAME} with job_id "${jobId}".`,
+          ...(teamNote ? [teamNote] : []),
         ].join('\n');
         return { content: [{ type: 'text' as const, text }] };
       } catch (error: any) {
