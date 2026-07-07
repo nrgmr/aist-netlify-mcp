@@ -91,9 +91,12 @@ export async function runClaudeDesignImport(
 
   // Resolve the requested team up front so a misspelled/unknown team lands in the
   // default team with a clear note, rather than failing the deploy and leaving the
-  // caller stuck. Only relevant when creating a new site.
-  const { slug: resolvedSlug, note: teamNote } =
-    existingSite || !account_slug ? { slug: account_slug, note: undefined } : await resolveTeamSlug(account_slug, request);
+  // caller stuck. Skipped for re-sends (the existing site's team is kept) and when
+  // no team was requested.
+  const resolveTeam = !existingSite && account_slug;
+  const { slug: resolvedSlug, note: teamNote } = resolveTeam
+    ? await resolveTeamSlug(account_slug, request)
+    : { slug: undefined, note: undefined };
 
   const site =
     existingSite ??
@@ -255,10 +258,11 @@ async function createImportSite(
   { account_slug, password }: { account_slug?: string; password?: string },
   request?: Request,
 ): Promise<NetlifySite> {
-  // account_slug is a best-effort hint. If it names an unknown/inaccessible team
-  // the create under that team fails; rather than fail the export, fall back to
-  // the user's default team. Auth failures still propagate — those are not a
-  // slug problem and must not be masked as one.
+  // Secondary net under resolveTeamSlug: unknown teams are normally resolved to
+  // the default team before we get here, but a team we couldn't verify (team list
+  // unavailable) or one the user can't create under still reaches this point. In
+  // those cases fall back to the default team rather than fail the export. Auth
+  // failures still propagate — those are not a slug problem and must not be masked.
   if (account_slug) {
     try {
       return await createUnderTeam(nameCandidates, account_slug, password, request);
