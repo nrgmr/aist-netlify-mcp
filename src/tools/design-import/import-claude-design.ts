@@ -352,7 +352,7 @@ export function registerClaudeDesignImportTool(server: McpServer, remoteMCPReque
     IMPORT_TOOL_NAME,
     {
       description:
-        'Import a design into Netlify from a publicly fetchable URL. The file is a self-contained HTML bundle with all images, fonts, and styles inlined. Netlify creates a new site, deploys the HTML, and returns a live URL.',
+        'Deploy a Claude Design design to Netlify. This is the "Send to Netlify" destination for Claude Design: it takes a publicly fetchable URL to a self-contained HTML bundle (images, fonts, and styles inlined), creates a Netlify site, deploys the HTML, and returns a live URL. Intended for Claude Design exports, not general-purpose web hosting.',
       inputSchema: importInputSchema,
       annotations: { readOnlyHint: false, destructiveHint: false },
     },
