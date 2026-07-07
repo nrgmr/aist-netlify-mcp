@@ -89,20 +89,28 @@ export async function runClaudeDesignImport(
 
   const existingSite = projectId ? await findSiteForProject(projectId, request) : undefined;
 
-  // Resolve the requested team up front so a misspelled/unknown team lands in the
-  // default team with a clear note, rather than failing the deploy and leaving the
-  // caller stuck. Skipped for re-sends (the existing site's team is kept) and when
-  // no team was requested.
-  const resolveTeam = !existingSite && account_slug;
-  const { slug: resolvedSlug, note: teamNote } = resolveTeam
-    ? await resolveTeamSlug(account_slug, request)
-    : { slug: undefined, note: undefined };
-
-  const site =
-    existingSite ??
-    (await createImportSite(siteNameCandidates(title, projectId), { account_slug: resolvedSlug, password }, request));
-  if (!existingSite && projectId) {
-    await recordProjectIdOnSite(site.id, projectId, request);
+  // A re-send keeps its existing site (and team); only a fresh import picks a team.
+  let site: NetlifySite;
+  let teamNote: string | undefined;
+  if (existingSite) {
+    site = existingSite;
+  } else {
+    // Resolve the requested team up front so a misspelled/unknown team lands in the
+    // default team with a note, rather than failing the deploy. resolveTeamSlug
+    // catches a verified-absent team; createImportSite reports the case where the
+    // team couldn't be verified or created under and it fell back anyway — either
+    // way the caller is told which team the design actually landed in.
+    const { slug, note } = account_slug ? await resolveTeamSlug(account_slug, request) : { slug: undefined, note: undefined };
+    const created = await createImportSite(siteNameCandidates(title, projectId), { account_slug: slug, password }, request);
+    site = created.site;
+    teamNote =
+      note ??
+      (created.usedDefaultFallback && account_slug
+        ? `Couldn't deploy to team "${account_slug}", so the design was deployed to your default team. Tell me the exact team name if you want it moved.`
+        : undefined);
+    if (projectId) {
+      await recordProjectIdOnSite(site.id, projectId, request);
+    }
   }
 
   const deployId = await deployHtmlToSite(html, site.id, request);
@@ -257,21 +265,23 @@ async function createImportSite(
   nameCandidates: string[],
   { account_slug, password }: { account_slug?: string; password?: string },
   request?: Request,
-): Promise<NetlifySite> {
+): Promise<{ site: NetlifySite; usedDefaultFallback: boolean }> {
   // Secondary net under resolveTeamSlug: unknown teams are normally resolved to
   // the default team before we get here, but a team we couldn't verify (team list
   // unavailable) or one the user can't create under still reaches this point. In
-  // those cases fall back to the default team rather than fail the export. Auth
-  // failures still propagate — those are not a slug problem and must not be masked.
+  // those cases fall back to the default team rather than fail the export, and
+  // report it so the caller is told. Auth failures still propagate — those are not
+  // a slug problem and must not be masked.
   if (account_slug) {
     try {
-      return await createUnderTeam(nameCandidates, account_slug, password, request);
+      return { site: await createUnderTeam(nameCandidates, account_slug, password, request), usedDefaultFallback: false };
     } catch (error) {
       if (error instanceof NetlifyUnauthError) throw error;
       appendErrorToLog(`account_slug "${account_slug}" unusable, creating under default team: ${error}`);
+      return { site: await createUnderTeam(nameCandidates, undefined, password, request), usedDefaultFallback: true };
     }
   }
-  return await createUnderTeam(nameCandidates, undefined, password, request);
+  return { site: await createUnderTeam(nameCandidates, undefined, password, request), usedDefaultFallback: false };
 }
 
 async function createUnderTeam(
