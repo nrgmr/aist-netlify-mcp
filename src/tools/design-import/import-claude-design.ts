@@ -14,7 +14,7 @@ import {
 } from '../../utils/api-networking.js';
 import { zipAndBuild } from '../deploy-tools/deploy-site.js';
 import { appendErrorToLog } from '../../utils/logging.js';
-import { decodeJob, encodeJob, fallbackImportSiteName, importSiteName, matchTeam, projectMarker, type TeamRef } from './job-utils.js';
+import { deployIdFromJob, fallbackImportSiteName, importSiteName, matchTeam, projectMarker, type TeamRef } from './job-utils.js';
 
 
 // Claude Design discovers export destinations by this literal tool name.
@@ -63,13 +63,7 @@ const statusInputSchema = {
   job_id: z.string().describe('Job id returned by import-claude-design-from-url.'),
 };
 
-type ImportInput = {
-  url: string;
-  title?: string;
-  account_slug?: string;
-  password?: string;
-  claude_design_project_id?: string;
-};
+type ImportInput = z.infer<z.ZodObject<typeof importInputSchema>>;
 type ImportResult = {
   site: NetlifySite;
   deployId: string;
@@ -114,14 +108,14 @@ export async function runClaudeDesignImport(
   }
 
   const deployId = await deployHtmlToSite(html, site.id, request);
-  return { site, deployId, jobId: encodeJob(site.id, deployId), updatedExistingSite: !!existingSite, teamNote };
+  return { site, deployId, jobId: deployId, updatedExistingSite: !!existingSite, teamNote };
 }
 
 export async function getClaudeDesignImportStatus(
   jobId: string,
   request?: Request,
 ): Promise<StatusResult> {
-  const { deployId } = decodeJob(jobId);
+  const deployId = deployIdFromJob(jobId);
   const deploy = await getAPIJSONResult(`/api/v1/deploys/${deployId}`, {}, {}, request);
   const state: string = deploy?.state || 'unknown';
   const status =

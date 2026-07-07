@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { slugify, encodeJob, decodeJob, projectMarker, importSiteName, fallbackImportSiteName, matchTeam } from './job-utils.ts';
+import { slugify, deployIdFromJob, projectMarker, importSiteName, fallbackImportSiteName, matchTeam } from './job-utils.ts';
 
 test('slugify returns undefined for missing or empty titles', () => {
   assert.equal(slugify(undefined), undefined);
@@ -47,11 +47,6 @@ test('fallbackImportSiteName keeps the marker so re-send lookups still match', (
   assert.notEqual(name, fallbackImportSiteName('p123', 'z9y8x7'));
 });
 
-test('encodeJob/decodeJob round-trips siteId and deployId', () => {
-  const jobId = encodeJob('site-123', 'deploy-456');
-  assert.deepEqual(decodeJob(jobId), { siteId: 'site-123', deployId: 'deploy-456' });
-});
-
 test('matchTeam resolves by slug or name case-insensitively, else returns a fallback note', () => {
   const teams = [{ slug: 'acme-team', name: 'Acme Inc' }, { slug: 'personal', name: 'Justin H' }];
   assert.deepEqual(matchTeam(teams, 'acme-team'), { slug: 'acme-team' });
@@ -65,17 +60,12 @@ test('matchTeam resolves by slug or name case-insensitively, else returns a fall
   assert.equal(matchTeam([], 'anything').slug, undefined);
 });
 
-test('decodeJob throws on a malformed job_id', () => {
-  const garbage = Buffer.from('no-separator-here').toString('base64url');
-  assert.throws(() => decodeJob(garbage), /invalid job_id/);
-});
-
-test('decodeJob rejects ids that could traverse the deploy API path', () => {
-  // deployId is interpolated into GET /api/v1/deploys/<deployId>; "../../user"
+test('deployIdFromJob returns a plain id and rejects ids that could traverse the deploy path', () => {
+  assert.equal(deployIdFromJob('deploy-456'), 'deploy-456');
+  // job_id is interpolated into GET /api/v1/deploys/<id>; a slash or dot segment
   // would resolve to a different authenticated endpoint.
-  const traversal = encodeJob('site-123', '../../user');
-  assert.throws(() => decodeJob(traversal), /invalid job_id/);
-  const slashed = encodeJob('site-123', 'a/b');
-  assert.throws(() => decodeJob(slashed), /invalid job_id/);
+  assert.throws(() => deployIdFromJob('../../user'), /invalid job_id/);
+  assert.throws(() => deployIdFromJob('a/b'), /invalid job_id/);
+  assert.throws(() => deployIdFromJob(''), /invalid job_id/);
 });
 

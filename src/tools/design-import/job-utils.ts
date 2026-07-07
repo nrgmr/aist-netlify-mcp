@@ -57,26 +57,15 @@ export function matchTeam(teams: TeamRef[], requested: string): { slug?: string;
   };
 }
 
-export function encodeJob(siteId: string, deployId: string): string {
-  return Buffer.from(`${siteId}:${deployId}`).toString('base64url');
-}
-
-// Netlify site and deploy ids are hex-ish tokens. The deployId is interpolated
-// into an API path (GET /api/v1/deploys/<deployId>), so a value with slashes or
-// dot segments could traverse to another authenticated endpoint — reject anything
-// that isn't a plain id.
+// The job_id is the deploy id: that is all the status poll needs. It is
+// interpolated into an API path (GET /api/v1/deploys/<deployId>), so validate it
+// as a plain token — a value with slashes or dot segments could traverse to
+// another authenticated endpoint.
 const ID_PATTERN = /^[A-Za-z0-9_-]{1,64}$/;
 
-export function decodeJob(jobId: string): { siteId: string; deployId: string } {
-  const decoded = Buffer.from(jobId, 'base64url').toString('utf-8');
-  const sep = decoded.indexOf(':');
-  if (sep === -1) {
+export function deployIdFromJob(jobId: string): string {
+  if (!ID_PATTERN.test(jobId)) {
     throw new Error('invalid job_id');
   }
-  const siteId = decoded.slice(0, sep);
-  const deployId = decoded.slice(sep + 1);
-  if (!ID_PATTERN.test(siteId) || !ID_PATTERN.test(deployId)) {
-    throw new Error('invalid job_id');
-  }
-  return { siteId, deployId };
+  return jobId;
 }
