@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { slugify, encodeJob, decodeJob, projectMarker, importSiteName, fallbackImportSiteName } from './job-utils.ts';
+import { slugify, encodeJob, decodeJob, projectMarker, importSiteName, fallbackImportSiteName, matchTeam } from './job-utils.ts';
 
 test('slugify returns undefined for missing or empty titles', () => {
   assert.equal(slugify(undefined), undefined);
@@ -50,6 +50,19 @@ test('fallbackImportSiteName keeps the marker so re-send lookups still match', (
 test('encodeJob/decodeJob round-trips siteId and deployId', () => {
   const jobId = encodeJob('site-123', 'deploy-456');
   assert.deepEqual(decodeJob(jobId), { siteId: 'site-123', deployId: 'deploy-456' });
+});
+
+test('matchTeam resolves by slug or name case-insensitively, else returns a fallback note', () => {
+  const teams = [{ slug: 'acme-team', name: 'Acme Inc' }, { slug: 'personal', name: 'Justin H' }];
+  assert.deepEqual(matchTeam(teams, 'acme-team'), { slug: 'acme-team' });
+  assert.deepEqual(matchTeam(teams, 'Acme Inc'), { slug: 'acme-team' }); // by name
+  assert.deepEqual(matchTeam(teams, 'ACME-TEAM'), { slug: 'acme-team' }); // case-insensitive
+  // unknown team -> no slug (default team) + an explanatory note
+  const miss = matchTeam(teams, 'acmee');
+  assert.equal(miss.slug, undefined);
+  assert.match(miss.note ?? '', /was not found/);
+  // empty team list -> also a note, never a throw
+  assert.equal(matchTeam([], 'anything').slug, undefined);
 });
 
 test('decodeJob throws on a malformed job_id', () => {

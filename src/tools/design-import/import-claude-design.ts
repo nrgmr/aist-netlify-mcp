@@ -14,7 +14,7 @@ import {
 } from '../../utils/api-networking.js';
 import { zipAndBuild } from '../deploy-tools/deploy-site.js';
 import { appendErrorToLog } from '../../utils/logging.js';
-import { decodeJob, encodeJob, fallbackImportSiteName, importSiteName, projectMarker } from './job-utils.js';
+import { decodeJob, encodeJob, fallbackImportSiteName, importSiteName, matchTeam, projectMarker, type TeamRef } from './job-utils.js';
 
 
 // Claude Design discovers export destinations by this literal tool name.
@@ -208,22 +208,15 @@ async function resolveTeamSlug(
   requested: string,
   request?: Request,
 ): Promise<{ slug?: string; note?: string }> {
-  let teams: Array<{ slug?: string; name?: string }>;
+  let teams: TeamRef[];
   try {
-    teams = (await getAPIJSONResult('/api/v1/accounts', {}, {}, request)) as typeof teams;
+    teams = (await getAPIJSONResult('/api/v1/accounts', {}, {}, request)) as TeamRef[];
   } catch {
+    // Can't list teams — pass the hint through; the create-time fallback catches
+    // an unusable team.
     return { slug: requested };
   }
-
-  const wanted = requested.toLowerCase();
-  const match = teams.find((team) => team.slug?.toLowerCase() === wanted || team.name?.toLowerCase() === wanted);
-  if (match?.slug) {
-    return { slug: match.slug };
-  }
-  return {
-    slug: undefined,
-    note: `Team "${requested}" was not found in your Netlify teams, so the design was deployed to your default team. Tell me the exact team name if you want it moved.`,
-  };
+  return matchTeam(teams, requested);
 }
 
 // Stores the project id on the new site so future sends can verify the match.
