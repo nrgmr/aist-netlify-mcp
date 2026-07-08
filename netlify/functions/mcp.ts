@@ -142,7 +142,10 @@ async function handleMCPPost(req: Request) {
 
   const server = new McpServer({
     name: "netlify",
+    title: "Netlify",
     version: getPackageVersion(),
+    websiteUrl: "https://www.netlify.com",
+    icons: [{ src: "https://www.netlify.com/favicon/icon.svg", mimeType: "image/svg+xml" }],
   });
 
   const contextConsumer = await getContextConsumerConfig();
