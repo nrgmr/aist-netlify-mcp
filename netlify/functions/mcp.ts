@@ -7,7 +7,9 @@ import { getPackageVersion } from "../../src/utils/version.ts";
 import { z } from "zod";
 import { checkCompatibility } from "../../src/utils/compatibility.ts";
 import { bindTools } from "../../src/tools/index.ts";
+import { registerClaudeDesignImportTool } from "../../src/tools/design-import/import-claude-design.ts";
 import { userIsAuthenticated, UNAUTHED_ERROR_PREFIX } from "../../src/utils/api-networking.ts";
+import { isClaudeMCPClient } from "../../src/utils/client-detection.ts";
 import { debugLog, maskToken } from "./mcp-server/logging.ts";
 import {Config} from "@netlify/functions";
 
@@ -100,8 +102,12 @@ async function handleMCPPost(req: Request) {
     mcpSessionId: req.headers.get('mcp-session-id'),
     mcpProtocolVersion: req.headers.get('mcp-protocol-version'),
     userAgent: req.headers.get('user-agent'),
+    // origin/referer identify which surface a request comes from; kept for
+    // diagnosing client behaviour when verbose logging is enabled.
     origin: req.headers.get('origin'),
+    referer: req.headers.get('referer'),
     auth: maskToken(req.headers.get('Authorization')),
+    clientInfoName: body?.params?.clientInfo?.name,
   });
 
   // Check for verbose mode via query parameter
@@ -159,6 +165,17 @@ async function handleMCPPost(req: Request) {
       });
     }
   );
+
+  // Standalone top-level tool (not part of the domain selector) so Claude Design
+  // can discover it by its exact name and list Netlify as a "Send to" destination.
+  // Registered only for Claude clients, which keeps it out of every non-Claude
+  // agent's tools/list. Within Claude it can still surface on other surfaces
+  // (Claude Code, claude.ai chat) because they share the connector's MCP URL and
+  // Claude does not filter tools per surface today; a per-URL marker is not an
+  // option since that URL is inherited from the claude.ai connector.
+  if (isClaudeMCPClient(req, body)) {
+    registerClaudeDesignImportTool(server, req);
+  }
 
   try {
     await bindTools(server, req, verboseMode);
