@@ -89,33 +89,32 @@ async function handleMCPPost(req: Request) {
     return jsonRpcError(400, -32700, 'Parse error: invalid JSON body');
   }
 
-  // Guarded here, not just inside debugLog: building these snapshots walks the
-  // whole (attacker-controlled, pre-auth) body and header set, work that must
-  // not run per-request in steady state.
+  // Guard the redaction walk behind the flag: redactSensitive() recurses the
+  // whole (attacker-controlled, pre-auth) body, and its argument is evaluated
+  // eagerly before debugLog checks the flag, so an inner check wouldn't spare
+  // that work in steady state.
   if (isVerboseLogging()) {
     debugLog('mcp post body', { method: body?.method, id: body?.id, params: redactSensitive(body?.params) });
-
-    // Request headers relevant to StreamableHTTP/MCP negotiation. `accept` must
-    // include both application/json and text/event-stream or the transport rejects
-    // the request; session/protocol headers help correlate the handshake. Only
-    // these explicitly named headers are logged — never a full header dump, which
-    // would leak credentials carried in headers like x-api-key or x-auth-token.
-    debugLog('mcp post request', {
-      method: body?.method,
-      id: body?.id,
-      accept: req.headers.get('accept'),
-      contentType: req.headers.get('content-type'),
-      mcpSessionId: req.headers.get('mcp-session-id'),
-      mcpProtocolVersion: req.headers.get('mcp-protocol-version'),
-      userAgent: req.headers.get('user-agent'),
-      // origin/referer identify which surface a request comes from; kept for
-      // diagnosing client behaviour when verbose logging is enabled.
-      origin: req.headers.get('origin'),
-      referer: req.headers.get('referer'),
-      auth: maskToken(req.headers.get('Authorization')),
-      clientInfoName: body?.params?.clientInfo?.name,
-    });
   }
+
+  // Request headers relevant to StreamableHTTP/MCP negotiation. `accept` must
+  // include both application/json and text/event-stream or the transport rejects
+  // the request; session/protocol headers help correlate the handshake.
+  debugLog('mcp post request', {
+    method: body?.method,
+    id: body?.id,
+    accept: req.headers.get('accept'),
+    contentType: req.headers.get('content-type'),
+    mcpSessionId: req.headers.get('mcp-session-id'),
+    mcpProtocolVersion: req.headers.get('mcp-protocol-version'),
+    userAgent: req.headers.get('user-agent'),
+    // origin/referer identify which surface a request comes from; kept for
+    // diagnosing client behaviour when verbose logging is enabled.
+    origin: req.headers.get('origin'),
+    referer: req.headers.get('referer'),
+    auth: maskToken(req.headers.get('Authorization')),
+    clientInfoName: body?.params?.clientInfo?.name,
+  });
 
   // Check for verbose mode via query parameter
   const url = new URL(req.url);
