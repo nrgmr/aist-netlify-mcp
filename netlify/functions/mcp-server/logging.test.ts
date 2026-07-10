@@ -48,6 +48,15 @@ test('safeBodySummary still summarizes real form-encoded bodies with redaction',
   assert.deepEqual(out, { grant_type: 'refresh_token', refresh_token: '[redacted]', scope: 'sites' });
 });
 
+test('safeBodySummary never logs unknown form field names', () => {
+  // A syntactically valid form key that isn't a recognized OAuth param must not
+  // be echoed — key-name redaction can't mask a secret carried as a field name.
+  const body = 'SECRET-AUTH-CODE=x';
+  const out = safeBodySummary(body);
+  assert.deepEqual(out, { unparseable: true, length: body.length });
+  assert.ok(!JSON.stringify(out).includes('SECRET-AUTH-CODE'));
+});
+
 test('safeBodySummary redacts at depth for JSON-RPC bodies', () => {
   const body = JSON.stringify({
     jsonrpc: '2.0',

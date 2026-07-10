@@ -40,15 +40,32 @@ export function slugify(title?: string): string | undefined {
   return slug || undefined;
 }
 
-export function encodeJob(siteId: string, deployId: string): string {
-  return Buffer.from(`${siteId}:${deployId}`).toString('base64url');
+export type TeamRef = { slug?: string; name?: string };
+
+// Matches a caller-supplied team hint against the user's teams, on slug or name
+// (the caller may pass either), case-insensitively. Returns the canonical slug
+// when found; otherwise an explanatory note so the deploy can fall back to the
+// default team and still tell the caller what happened, instead of failing.
+export function matchTeam(teams: TeamRef[], requested: string): { slug?: string; note?: string } {
+  const wanted = requested.toLowerCase();
+  const match = teams.find((team) => team.slug?.toLowerCase() === wanted || team.name?.toLowerCase() === wanted);
+  if (match?.slug) {
+    return { slug: match.slug };
+  }
+  return {
+    note: `Team "${requested}" was not found in your Netlify teams, so the design was deployed to your default team. Tell me the exact team name if you want it moved.`,
+  };
 }
 
-export function decodeJob(jobId: string): { siteId: string; deployId: string } {
-  const decoded = Buffer.from(jobId, 'base64url').toString('utf-8');
-  const sep = decoded.indexOf(':');
-  if (sep === -1) {
+// The job_id is the deploy id: that is all the status poll needs. It is
+// interpolated into an API path (GET /api/v1/deploys/<deployId>), so validate it
+// as a plain token — a value with slashes or dot segments could traverse to
+// another authenticated endpoint.
+const ID_PATTERN = /^[A-Za-z0-9_-]{1,64}$/;
+
+export function deployIdFromJob(jobId: string): string {
+  if (!ID_PATTERN.test(jobId)) {
     throw new Error('invalid job_id');
   }
-  return { siteId: decoded.slice(0, sep), deployId: decoded.slice(sep + 1) };
+  return jobId;
 }

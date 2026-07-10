@@ -14,7 +14,8 @@ import {
 } from '../../utils/api-networking.js';
 import { zipAndBuild } from '../deploy-tools/deploy-site.js';
 import { appendErrorToLog } from '../../utils/logging.js';
-import { decodeJob, encodeJob, fallbackImportSiteName, importSiteName, projectMarker } from './job-utils.js';
+import { deployIdFromJob, fallbackImportSiteName, importSiteName, matchTeam, projectMarker, type TeamRef } from './job-utils.js';
+
 
 // Claude Design discovers export destinations by this literal tool name.
 // It MUST match exactly or Netlify will not appear in the "Send to…" menu.
@@ -62,14 +63,14 @@ const statusInputSchema = {
   job_id: z.string().describe('Job id returned by import-claude-design-from-url.'),
 };
 
-type ImportInput = {
-  url: string;
-  title?: string;
-  account_slug?: string;
-  password?: string;
-  claude_design_project_id?: string;
+type ImportInput = z.infer<z.ZodObject<typeof importInputSchema>>;
+type ImportResult = {
+  site: NetlifySite;
+  deployId: string;
+  jobId: string;
+  updatedExistingSite: boolean;
+  teamNote?: string;
 };
-type ImportResult = { site: NetlifySite; deployId: string; jobId: string; updatedExistingSite: boolean };
 type StatusResult = { status: 'processing' | 'done' | 'failed'; design_url?: string; state: string };
 
 // === core logic (pure-ish, exported for tests + local verification) ===
@@ -81,22 +82,40 @@ export async function runClaudeDesignImport(
   const html = await fetchDesignHtml(url);
 
   const existingSite = projectId ? await findSiteForProject(projectId, request) : undefined;
-  const site =
-    existingSite ??
-    (await createImportSite(siteNameCandidates(title, projectId), { account_slug, password }, request));
-  if (!existingSite && projectId) {
-    await recordProjectIdOnSite(site.id, projectId, request);
+
+  // A re-send keeps its existing site (and team); only a fresh import picks a team.
+  let site: NetlifySite;
+  let teamNote: string | undefined;
+  if (existingSite) {
+    site = existingSite;
+  } else {
+    // Resolve the requested team up front so a misspelled/unknown team lands in the
+    // default team with a note, rather than failing the deploy. resolveTeamSlug
+    // catches a verified-absent team; createImportSite reports the case where the
+    // team couldn't be verified or created under and it fell back anyway — either
+    // way the caller is told which team the design actually landed in.
+    const { slug, note } = account_slug ? await resolveTeamSlug(account_slug, request) : { slug: undefined, note: undefined };
+    const created = await createImportSite(siteNameCandidates(title, projectId), { account_slug: slug, password }, request);
+    site = created.site;
+    teamNote =
+      note ??
+      (created.usedDefaultFallback && account_slug
+        ? `Couldn't deploy to team "${account_slug}", so the design was deployed to your default team. Tell me the exact team name if you want it moved.`
+        : undefined);
+    if (projectId) {
+      await recordProjectIdOnSite(site.id, projectId, request);
+    }
   }
 
   const deployId = await deployHtmlToSite(html, site.id, request);
-  return { site, deployId, jobId: encodeJob(site.id, deployId), updatedExistingSite: !!existingSite };
+  return { site, deployId, jobId: deployId, updatedExistingSite: !!existingSite, teamNote };
 }
 
 export async function getClaudeDesignImportStatus(
   jobId: string,
   request?: Request,
 ): Promise<StatusResult> {
-  const { deployId } = decodeJob(jobId);
+  const deployId = deployIdFromJob(jobId);
   const deploy = await getAPIJSONResult(`/api/v1/deploys/${deployId}`, {}, {}, request);
   const state: string = deploy?.state || 'unknown';
   const status =
@@ -105,31 +124,56 @@ export async function getClaudeDesignImportStatus(
 }
 
 async function fetchDesignHtml(url: string): Promise<string> {
-  if (!url.startsWith('https://')) {
+  let target: URL;
+  try {
+    target = new URL(url);
+  } catch {
+    throw new Error('url must be a valid https URL');
+  }
+  if (target.protocol !== 'https:') {
     throw new Error('url must be an https URL');
   }
 
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
   try {
-    const resp = await fetch(url, { signal: controller.signal, headers: { 'user-agent': 'netlify-mcp' } });
+    // redirect: 'error' keeps the fetch to the exact host the caller named — a
+    // redirect can't downgrade to http or bounce to an internal host.
+    const resp = await fetch(target, {
+      redirect: 'error',
+      signal: controller.signal,
+      headers: { 'user-agent': 'netlify-mcp' },
+    });
     if (!resp.ok) {
       throw new Error(`could not fetch design from url (status ${resp.status})`);
     }
-
-    const declaredSize = Number(resp.headers.get('content-length') || 0);
-    if (declaredSize > MAX_HTML_BYTES) {
-      throw new Error(`design exceeds the ${MAX_HTML_BYTES}-byte size limit`);
-    }
-
-    const html = await resp.text();
-    if (html.length > MAX_HTML_BYTES) {
-      throw new Error(`design exceeds the ${MAX_HTML_BYTES}-byte size limit`);
-    }
-    return html;
+    return await readBodyWithCap(resp, controller);
   } finally {
     clearTimeout(timeout);
   }
+}
+
+// Streams the body and aborts the moment the accumulated bytes exceed the cap, so
+// a missing/lying content-length or a slow-drip response cannot exhaust memory
+// before a post-hoc length check would run. Counts bytes, not UTF-16 code units.
+async function readBodyWithCap(resp: Response, controller: AbortController): Promise<string> {
+  const reader = resp.body?.getReader();
+  if (!reader) {
+    throw new Error('could not read design from url');
+  }
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.byteLength;
+    if (total > MAX_HTML_BYTES) {
+      controller.abort();
+      throw new Error(`design exceeds the ${MAX_HTML_BYTES}-byte size limit`);
+    }
+    chunks.push(value);
+  }
+  return Buffer.concat(chunks).toString('utf-8');
 }
 
 // Finds the site a previous send of this project created: a name-filtered lookup
@@ -157,6 +201,27 @@ async function findSiteForProject(projectId: string, request?: Request): Promise
     appendErrorToLog(`Claude Design project lookup failed (falling back to new site): ${error}`);
   }
   return undefined;
+}
+
+// Resolves a caller-supplied team hint against the user's actual teams, matching
+// on slug or name (the caller may pass either). Returns the canonical slug when
+// found, or an empty slug plus an explanatory note when it isn't — so the deploy
+// goes to the default team and the caller is told, instead of the deploy failing.
+// If the team list can't be fetched, the hint is passed through and the create-time
+// fallback handles an unusable team.
+async function resolveTeamSlug(
+  requested: string,
+  request?: Request,
+): Promise<{ slug?: string; note?: string }> {
+  let teams: TeamRef[];
+  try {
+    teams = (await getAPIJSONResult('/api/v1/accounts', {}, {}, request)) as TeamRef[];
+  } catch {
+    // Can't list teams — pass the hint through; the create-time fallback catches
+    // an unusable team.
+    return { slug: requested };
+  }
+  return matchTeam(teams, requested);
 }
 
 // Stores the project id on the new site so future sends can verify the match.
@@ -193,6 +258,30 @@ class SiteNameTakenError extends Error {}
 async function createImportSite(
   nameCandidates: string[],
   { account_slug, password }: { account_slug?: string; password?: string },
+  request?: Request,
+): Promise<{ site: NetlifySite; usedDefaultFallback: boolean }> {
+  // Secondary net under resolveTeamSlug: unknown teams are normally resolved to
+  // the default team before we get here, but a team we couldn't verify (team list
+  // unavailable) or one the user can't create under still reaches this point. In
+  // those cases fall back to the default team rather than fail the export, and
+  // report it so the caller is told. Auth failures still propagate — those are not
+  // a slug problem and must not be masked.
+  if (account_slug) {
+    try {
+      return { site: await createUnderTeam(nameCandidates, account_slug, password, request), usedDefaultFallback: false };
+    } catch (error) {
+      if (error instanceof NetlifyUnauthError) throw error;
+      appendErrorToLog(`account_slug "${account_slug}" unusable, creating under default team: ${error}`);
+      return { site: await createUnderTeam(nameCandidates, undefined, password, request), usedDefaultFallback: true };
+    }
+  }
+  return { site: await createUnderTeam(nameCandidates, undefined, password, request), usedDefaultFallback: false };
+}
+
+async function createUnderTeam(
+  nameCandidates: string[],
+  account_slug: string | undefined,
+  password: string | undefined,
   request?: Request,
 ): Promise<NetlifySite> {
   // account_slug targets a specific team; the sites API reads it from the query
@@ -263,7 +352,7 @@ export function registerClaudeDesignImportTool(server: McpServer, remoteMCPReque
     IMPORT_TOOL_NAME,
     {
       description:
-        'Import a design into Netlify from a publicly fetchable URL. The file is a self-contained HTML bundle with all images, fonts, and styles inlined. Netlify creates a new site, deploys the HTML, and returns a live URL.',
+        'Deploy a Claude Design design to Netlify. This is the "Send to Netlify" destination for Claude Design: it takes a publicly fetchable URL to a self-contained HTML bundle (images, fonts, and styles inlined), creates a Netlify site, deploys the HTML, and returns a live URL. Intended for Claude Design exports, not general-purpose web hosting.',
       inputSchema: importInputSchema,
       annotations: { readOnlyHint: false, destructiveHint: false },
     },
@@ -272,7 +361,7 @@ export function registerClaudeDesignImportTool(server: McpServer, remoteMCPReque
       if (authError) return authError;
 
       try {
-        const { site, jobId, updatedExistingSite } = await runClaudeDesignImport(input, remoteMCPRequest);
+        const { site, jobId, updatedExistingSite, teamNote } = await runClaudeDesignImport(input, remoteMCPRequest);
         const liveUrl = site.ssl_url || site.url;
         const text = [
           updatedExistingSite
@@ -280,6 +369,7 @@ export function registerClaudeDesignImportTool(server: McpServer, remoteMCPReque
             : `Imported into Netlify: ${liveUrl}`,
           `Manage in Netlify: ${site.admin_url}`,
           `The deploy is finalizing and the URL goes live momentarily. To confirm it is ready, call ${STATUS_TOOL_NAME} with job_id "${jobId}".`,
+          ...(teamNote ? [teamNote] : []),
         ].join('\n');
         return { content: [{ type: 'text' as const, text }] };
       } catch (error: any) {

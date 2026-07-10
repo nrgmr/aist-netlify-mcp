@@ -56,6 +56,30 @@ const SENSITIVE_BODY_FIELDS = new Set([
   'registration_access_token',
 ]);
 
+// Form-encoded bodies are logged with their KEYS intact, and key-name redaction
+// can't mask a secret that arrives as an unexpected field name (e.g. an attacker
+// posting `SECRET-AUTH-CODE=x`). So form parsing is restricted to these known
+// OAuth parameters; a body with any other key falls through to `unparseable`
+// rather than logging arbitrary field names. Sensitive values among these are
+// still redacted by redactSensitive via SENSITIVE_BODY_FIELDS.
+const SAFE_FORM_BODY_FIELDS = new Set([
+  ...SENSITIVE_BODY_FIELDS,
+  'grant_type',
+  'scope',
+  'client_id',
+  'redirect_uri',
+  'response_type',
+  'response_mode',
+  'state',
+  'nonce',
+  'code_challenge',
+  'code_challenge_method',
+  'client_assertion_type',
+  'token_type_hint',
+  'resource',
+  'audience',
+]);
+
 // Deep-redacts sensitive fields anywhere in a parsed JSON value. Depth matters:
 // MCP tool-call bodies nest secrets (params.arguments.password), so a top-level
 // sweep misses them. `code` is redacted only when it's a string — the string form
@@ -96,13 +120,14 @@ export function safeBodySummary(body: string | null | undefined): Record<string,
   try {
     parsed = JSON.parse(body);
   } catch {
-    // Not JSON — accept the URLSearchParams fallback only when the keys look
-    // like real form fields. Anything else (truncated JSON, plain text) would
-    // land verbatim in the parsed object's KEYS, where key-name redaction
-    // can't catch a secret, so it must fall through to `unparseable`.
+    // Not JSON — accept the URLSearchParams fallback only when every key is a
+    // recognized OAuth form field. Anything else (truncated JSON, plain text, or
+    // an unexpected field name carrying a secret) would land verbatim in the
+    // parsed object's KEYS, where key-name redaction can't catch it, so it must
+    // fall through to `unparseable`.
     const form = Object.fromEntries(new URLSearchParams(body));
     const keys = Object.keys(form);
-    parsed = keys.length > 0 && keys.every((key) => /^[\w.-]{1,64}$/.test(key)) ? form : null;
+    parsed = keys.length > 0 && keys.every((key) => SAFE_FORM_BODY_FIELDS.has(key)) ? form : null;
   }
 
   if (!parsed || typeof parsed !== 'object') {

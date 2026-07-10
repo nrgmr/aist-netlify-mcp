@@ -97,7 +97,9 @@ async function handleMCPPost(req: Request) {
 
     // Request headers relevant to StreamableHTTP/MCP negotiation. `accept` must
     // include both application/json and text/event-stream or the transport rejects
-    // the request; session/protocol headers help correlate the handshake.
+    // the request; session/protocol headers help correlate the handshake. Only
+    // these explicitly named headers are logged — never a full header dump, which
+    // would leak credentials carried in headers like x-api-key or x-auth-token.
     debugLog('mcp post request', {
       method: body?.method,
       id: body?.id,
@@ -106,16 +108,12 @@ async function handleMCPPost(req: Request) {
       mcpSessionId: req.headers.get('mcp-session-id'),
       mcpProtocolVersion: req.headers.get('mcp-protocol-version'),
       userAgent: req.headers.get('user-agent'),
+      // origin/referer identify which surface a request comes from; kept for
+      // diagnosing client behaviour when verbose logging is enabled.
       origin: req.headers.get('origin'),
+      referer: req.headers.get('referer'),
       auth: maskToken(req.headers.get('Authorization')),
       clientInfoName: body?.params?.clientInfo?.name,
-      // Full header dump (auth values masked) to identify what different MCP
-      // clients actually send — the design-tool gating keys off these signals.
-      headers: Object.fromEntries(
-        [...req.headers.entries()].map(([k, v]) =>
-          /authorization|cookie/i.test(k) ? [k, maskToken(v)] : [k, v],
-        ),
-      ),
     });
   }
 
@@ -151,7 +149,10 @@ async function handleMCPPost(req: Request) {
 
   const server = new McpServer({
     name: "netlify",
+    title: "Netlify",
     version: getPackageVersion(),
+    websiteUrl: "https://www.netlify.com",
+    icons: [{ src: "https://www.netlify.com/favicon/icon.svg", mimeType: "image/svg+xml" }],
   });
 
   const contextConsumer = await getContextConsumerConfig();
@@ -177,11 +178,11 @@ async function handleMCPPost(req: Request) {
 
   // Standalone top-level tool (not part of the domain selector) so Claude Design
   // can discover it by its exact name and list Netlify as a "Send to" destination.
-  // Claude Design is its only consumer, so it is registered for Claude clients
-  // alone — every other agent (Codex, Gemini, editors, generic MCP clients) gets a
-  // tools/list without it. The check is per-request because this server is
-  // stateless: clientInfo only arrives on initialize, so the user-agent is the
-  // signal that persists across tools/list and tools/call.
+  // Registered only for Claude clients, which keeps it out of every non-Claude
+  // agent's tools/list. Within Claude it can still surface on other surfaces
+  // (Claude Code, claude.ai chat) because they share the connector's MCP URL and
+  // Claude does not filter tools per surface today; a per-URL marker is not an
+  // option since that URL is inherited from the claude.ai connector.
   if (isClaudeMCPClient(req, body)) {
     registerClaudeDesignImportTool(server, req);
   }
