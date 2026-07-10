@@ -10,7 +10,7 @@ import { bindTools } from "../../src/tools/index.ts";
 import { registerClaudeDesignImportTool } from "../../src/tools/design-import/import-claude-design.ts";
 import { userIsAuthenticated, UNAUTHED_ERROR_PREFIX } from "../../src/utils/api-networking.ts";
 import { isClaudeMCPClient } from "../../src/utils/client-detection.ts";
-import { debugLog, maskToken } from "./mcp-server/logging.ts";
+import { debugLog, isVerboseLogging, maskToken, redactSensitive } from "./mcp-server/logging.ts";
 import {Config} from "@netlify/functions";
 
 // Netlify serverless function handler
@@ -89,7 +89,13 @@ async function handleMCPPost(req: Request) {
     return jsonRpcError(400, -32700, 'Parse error: invalid JSON body');
   }
 
-  debugLog('mcp post body', { method: body?.method, id: body?.id, params: body?.params });
+  // Guard the redaction walk behind the flag: redactSensitive() recurses the
+  // whole (attacker-controlled, pre-auth) body, and its argument is evaluated
+  // eagerly before debugLog checks the flag, so an inner check wouldn't spare
+  // that work in steady state.
+  if (isVerboseLogging()) {
+    debugLog('mcp post body', { method: body?.method, id: body?.id, params: redactSensitive(body?.params) });
+  }
 
   // Request headers relevant to StreamableHTTP/MCP negotiation. `accept` must
   // include both application/json and text/event-stream or the transport rejects

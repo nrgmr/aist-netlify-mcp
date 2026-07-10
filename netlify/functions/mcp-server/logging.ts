@@ -56,9 +56,63 @@ const SENSITIVE_BODY_FIELDS = new Set([
   'registration_access_token',
 ]);
 
+// Form-encoded bodies are logged with their KEYS intact, and key-name redaction
+// can't mask a secret that arrives as an unexpected field name (e.g. an attacker
+// posting `SECRET-AUTH-CODE=x`). So form parsing is restricted to these known
+// OAuth parameters; a body with any other key falls through to `unparseable`
+// rather than logging arbitrary field names. Sensitive values among these are
+// still redacted by redactSensitive via SENSITIVE_BODY_FIELDS.
+const SAFE_FORM_BODY_FIELDS = new Set([
+  ...SENSITIVE_BODY_FIELDS,
+  'grant_type',
+  'scope',
+  'client_id',
+  'redirect_uri',
+  'response_type',
+  'response_mode',
+  'state',
+  'nonce',
+  'code_challenge',
+  'code_challenge_method',
+  'client_assertion_type',
+  'token_type_hint',
+  'resource',
+  'audience',
+]);
+
+// Deep-redacts sensitive fields anywhere in a parsed JSON value. Depth matters:
+// MCP tool-call bodies nest secrets (params.arguments.password), so a top-level
+// sweep misses them. `code` is redacted only when it's a string — the string form
+// is an OAuth authorization code, while the numeric form is a JSON-RPC error code
+// that logs need to keep.
+//
+// The depth cap is load-bearing: this runs on attacker-controlled bodies in the
+// request path, and JSON.parse happily produces values deep enough to blow the
+// recursion stack. No legitimate MCP payload comes anywhere near the cap.
+const MAX_REDACT_DEPTH = 32;
+
+export function redactSensitive<T>(value: T, depth = 0): T {
+  if (depth >= MAX_REDACT_DEPTH) {
+    return '[redacted: nesting too deep]' as T;
+  }
+  if (Array.isArray(value)) {
+    return value.map((entry) => redactSensitive(entry, depth + 1)) as T;
+  }
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(
+      Object.entries(value as Record<string, unknown>).map(([key, entry]) =>
+        SENSITIVE_BODY_FIELDS.has(key) && (key !== 'code' || typeof entry === 'string')
+          ? [key, '[redacted]']
+          : [key, redactSensitive(entry, depth + 1)],
+      ),
+    ) as T;
+  }
+  return value;
+}
+
 // Produce a log-safe view of a request body: parses JSON or form-encoded
-// payloads, redacts secrets, and surfaces the rest (including `scope`) so we can
-// debug failures without leaking credentials.
+// payloads, redacts secrets at any depth, and surfaces the rest (including
+// `scope`) so we can debug failures without leaking credentials.
 export function safeBodySummary(body: string | null | undefined): Record<string, unknown> {
   if (!body) return { empty: true };
 
@@ -66,17 +120,19 @@ export function safeBodySummary(body: string | null | undefined): Record<string,
   try {
     parsed = JSON.parse(body);
   } catch {
-    // not JSON — fall back to form-encoded (URLSearchParams never throws)
-    parsed = Object.fromEntries(new URLSearchParams(body));
+    // Not JSON — accept the URLSearchParams fallback only when every key is a
+    // recognized OAuth form field. Anything else (truncated JSON, plain text, or
+    // an unexpected field name carrying a secret) would land verbatim in the
+    // parsed object's KEYS, where key-name redaction can't catch it, so it must
+    // fall through to `unparseable`.
+    const form = Object.fromEntries(new URLSearchParams(body));
+    const keys = Object.keys(form);
+    parsed = keys.length > 0 && keys.every((key) => SAFE_FORM_BODY_FIELDS.has(key)) ? form : null;
   }
 
   if (!parsed || typeof parsed !== 'object') {
     return { unparseable: true, length: body.length };
   }
 
-  const safe: Record<string, unknown> = {};
-  for (const [key, value] of Object.entries(parsed as Record<string, unknown>)) {
-    safe[key] = SENSITIVE_BODY_FIELDS.has(key) ? '[redacted]' : value;
-  }
-  return safe;
+  return redactSensitive(parsed as Record<string, unknown>);
 }
