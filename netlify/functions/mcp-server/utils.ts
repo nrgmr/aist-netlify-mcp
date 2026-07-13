@@ -70,8 +70,20 @@ function getSecretKey(): Uint8Array {
 }
 
 export function getOAuthIssuer(): string {
-  // Use the environment variable or default to localhost
-  return process.env.OAUTH_ISSUER || 'http://localhost:8888';
+  const raw = process.env.OAUTH_ISSUER || 'http://localhost:8888';
+  // Canonicalize so the issuer string is byte-identical everywhere it's used.
+  // The AS/PRM metadata documents pass through urlsToHTTP(), which normalizes
+  // every URL via `new URL().toString()` — and WHATWG URL appends a trailing
+  // slash to a bare origin (https://host -> https://host/). The RFC 9207 `iss`
+  // authorization-response param MUST byte-match the advertised `issuer`, so we
+  // normalize here rather than emit the raw env value (which lacked the slash
+  // and made strict clients like Codex reject the callback). Idempotent, and a
+  // no-op for issuers that already include a path or trailing slash.
+  try {
+    return new URL(raw).toString();
+  } catch {
+    return raw;
+  }
 }
 
 export function addCommonHeadersToHandlerResp(response: HandlerResponse): HandlerResponse {
