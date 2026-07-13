@@ -172,16 +172,25 @@ export function returnNeedsAuthResponse(opts?: { error?: string; errorDescriptio
   });
 }
 
-export async function createJWE(payload: Record<string, any>, expiresIn: string = '1h'): Promise<string> {
+/**
+ * Encrypt a payload as a JWE. `expiresIn` accepts any `jose` duration string
+ * (e.g. '1h', '7d'); pass `null` to mint a token with NO expiry — used for the
+ * stateless dynamic-client-registration `client_id`, which encodes the client's
+ * metadata and must remain valid for the life of the registration (revocation is
+ * via JWE_SECRET rotation, which invalidates all registrations at once).
+ */
+export async function createJWE(payload: Record<string, any>, expiresIn: string | null = '1h'): Promise<string> {
   const secret = getSecretKey()
 
-  const jwe = await new EncryptJWT(payload)
+  const builder = new EncryptJWT(payload)
     .setProtectedHeader({ alg: 'dir', enc: 'A256GCM' })
     .setIssuedAt() // record when the token was minted so expiry can be diagnosed
-    .setExpirationTime(expiresIn)
-    .encrypt(secret)
 
-  return jwe
+  if (expiresIn !== null) {
+    builder.setExpirationTime(expiresIn)
+  }
+
+  return builder.encrypt(secret)
 }
 
 /**

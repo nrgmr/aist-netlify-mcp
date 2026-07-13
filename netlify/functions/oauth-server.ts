@@ -2,7 +2,8 @@ import serverless from "serverless-http";
 import type { Handler, HandlerResponse, HandlerEvent, HandlerContext } from "@netlify/functions";
 import { Provider } from "oidc-provider";
 import type { Configuration, ClientMetadata } from "oidc-provider";
-import { handleAuthStart, handleClientSideAuthExchange, handleCodeExchange, handleServerSideAuthRedirect } from "./mcp-server/auth-flow.ts";
+import { handleAuthStart, handleClientRegistration, handleClientSideAuthExchange, handleCodeExchange, handleServerSideAuthRedirect } from "./mcp-server/auth-flow.ts";
+import { resolveClient } from "./mcp-server/client-registry.ts";
 import { getOAuthIssuer, addCommonHeadersToHandlerResp, headersToHeadersObject, getParsedUrl, urlsToHTTP } from "./mcp-server/utils.ts";
 import { getClientById, staticClients } from "./mcp-server/oauth-clients.ts";
 import { debugLog, safeBodySummary } from "./mcp-server/logging.ts";
@@ -38,7 +39,25 @@ class ClientAdapter {
 
   async find(id: string) {
     if (this.name === 'Client') {
-      return getClientById(id);
+      const staticClient = getClientById(id);
+      if (staticClient) {
+        return staticClient;
+      }
+      // Stateless dynamic clients aren't persisted — recover them from the
+      // encrypted client_id so oidc-provider-handled endpoints recognize them.
+      const { client, source } = await resolveClient(id);
+      if (client && source === 'stateless') {
+        return {
+          client_id: client.client_id,
+          redirect_uris: client.redirect_uris,
+          grant_types: client.grant_types,
+          response_types: client.response_types,
+          token_endpoint_auth_method: client.token_endpoint_auth_method,
+          application_type: client.application_type,
+          ...(client.scope ? { scope: client.scope } : {}),
+        } as ClientMetadata;
+      }
+      return undefined;
     }
     return undefined;
   }
@@ -195,36 +214,13 @@ const oAuthHandler: Handler = async (req, context) => {
   }
 
 
-  if((isRegistrationPath || isRegisterAlias) && req.body){
+  // Dynamic client registration (RFC 7591). Handled directly and statelessly:
+  // the returned client_id is a JWE of the client metadata (see auth-flow /
+  // client-registry), so nothing needs persisting. Scope sanitization and
+  // application_type inference happen inside the handler.
+  if ((isRegistrationPath || isRegisterAlias) && req.httpMethod === 'POST') {
     debugLog('registration request', safeBodySummary(req.body));
-    // Some clients register with a `scope` that includes values we don't
-    // support; oidc-provider rejects the whole registration with
-    // invalid_client_metadata. Filter the requested scopes down to the
-    // supported set (dropping the field entirely if nothing remains) so the
-    // client can still register.
-    try {
-      const regInfo = JSON.parse(req.body);
-      if (typeof regInfo.scope === 'string') {
-        const requested = regInfo.scope.split(/\s+/).filter(Boolean);
-        const allowed = requested.filter((s: string) => SUPPORTED_SCOPES.includes(s));
-        if (allowed.length !== requested.length) {
-          console.log('sanitizing registration scope', { requested, allowed });
-          if (allowed.length > 0) {
-            regInfo.scope = allowed.join(' ');
-          } else {
-            delete regInfo.scope;
-          }
-          req.body = JSON.stringify(regInfo);
-          if (req.headers) {
-            delete req.headers['content-length'];
-            delete req.headers['Content-Length'];
-            req.headers['content-length'] = String(Buffer.byteLength(req.body));
-          }
-        }
-      }
-    } catch (err) {
-      console.error('failed to sanitize registration scope', err);
-    }
+    return await handleClientRegistration(reqObj, SUPPORTED_SCOPES);
   }
 
   // RFC 9728 Protected Resource Metadata. MCP clients read `authorization_servers`
@@ -299,35 +295,6 @@ const oAuthHandler: Handler = async (req, context) => {
   }else if(isCodeExchangePath){
     return await handleCodeExchange(reqObj);
   }
-
-  // ensure requests have a proper application type
-  // if(isRegistrationPath){
-  //   const regInfo = JSON.parse(req.body || '{}');
-  //   if(regInfo && !regInfo.application_type && Array.isArray(regInfo.redirect_uris)){
-  //     regInfo.redirect_uris.some((uri: string) => {
-  //       if(uri.startsWith('http')){
-  //         regInfo.application_type = 'web';
-  //         return true;
-  //       }
-  //       return false;
-  //     });
-
-  //     if(regInfo.application_type !== 'web'){
-  //       regInfo.application_type = 'native';
-  //     }
-      
-  //     reqObj.headers.delete('content-length');
-  //     reqObj = new Request(req.rawUrl, {
-  //       method: reqObj.method,
-  //       headers: reqObj.headers,
-  //       body: JSON.stringify(regInfo),
-  //     });
-  //     req.headers = Object.fromEntries(reqObj.headers.entries());
-  //     req.body = JSON.stringify(regInfo);
-
-  //     console.log('updated', JSON.stringify(req, null, 2));
-  //   }
-  // }
 
   // allow catch all for these paths to be handled by the OIDC provider
   const resp = await invokeOIDCProvider(req, context, invocationOverrides);

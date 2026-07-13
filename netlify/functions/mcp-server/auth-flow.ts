@@ -1,7 +1,82 @@
 import { HandlerResponse } from "@netlify/functions";
 import { createHash } from "crypto";
 import { createJWE, decryptJWE, getOAuthIssuer } from "./utils.ts";
-import { debugLog } from "./logging.ts";
+import { debugLog, maskToken } from "./logging.ts";
+import {
+  createStatelessClientId,
+  inferApplicationType,
+  isRedirectUriAllowed,
+  resolveClient,
+  type RegisteredClient,
+} from "./client-registry.ts";
+
+// Grant types this Authorization Server issues. Registration requests are
+// intersected with this set so a client can't register for a flow we don't run.
+const SUPPORTED_GRANT_TYPES = ['authorization_code', 'refresh_token'] as const;
+
+/**
+ * When true, any request whose redirect_uri we can't match to a registration is
+ * rejected — a stateless client presenting a redirect it didn't register, a
+ * static client whose exact redirect string we haven't verified, or a
+ * legacy/foreign `client_id` we can't resolve. Defaults to FALSE so deploying
+ * this introduces no breaking change for any existing client: every such case
+ * is logged (see the always-on warn below) but allowed. Flip
+ * DCR_REJECT_UNKNOWN_CLIENTS=true to turn those warnings into hard rejections
+ * once the logs show it's safe to enforce.
+ */
+function rejectUnknownClients(): boolean {
+  const v = (process.env.DCR_REJECT_UNKNOWN_CLIENTS ?? '').trim().toLowerCase();
+  return v === 'true' || v === '1' || v === 'yes';
+}
+
+/** Host of a redirect_uri for logging, without leaking the full URI. */
+function redirectHostForLog(redirectUri: string): string {
+  try {
+    return new URL(redirectUri).host || 'unknown';
+  } catch {
+    return 'unparseable';
+  }
+}
+
+/**
+ * Redirect_uri validation gate. Returns an OAuth error response when the
+ * request must be rejected, or null when it may proceed.
+ *
+ * Log-only by default: a request that matches a registration proceeds quietly;
+ * anything else (a stateless/static client whose redirect doesn't match, or an
+ * unresolvable client_id) is ALLOWED but recorded via an always-on warning, so
+ * deploying this can't break any existing client. Setting
+ * DCR_REJECT_UNKNOWN_CLIENTS=true turns those warnings into hard rejections.
+ */
+async function validateClientRedirect(
+  clientId: string,
+  redirectUri: string,
+  op: string,
+): Promise<HandlerResponse | null> {
+  const { client, source } = await resolveClient(clientId);
+
+  if (client && isRedirectUriAllowed(client, redirectUri)) {
+    debugLog(`${op}: redirect_uri validated`, { client_id: clientId, source });
+    return null;
+  }
+
+  if (rejectUnknownClients()) {
+    const [error, description] = client
+      ? ['invalid_request', 'redirect_uri does not match a registered redirect URI for this client']
+      : ['invalid_client', 'Unregistered client_id or redirect_uri'];
+    return oauthError(400, error, description, op, { client_id: clientId, source, redirect_uri: redirectUri });
+  }
+
+  // Log-only mode: surface unconditionally (not debugLog) so operators can see
+  // this traffic in steady state and decide when it's safe to enforce.
+  console.warn('[oauth] redirect_uri not validated (allowed; set DCR_REJECT_UNKNOWN_CLIENTS=true to enforce)', {
+    op,
+    source,
+    client_id: maskToken(clientId),
+    redirect_host: redirectHostForLog(redirectUri),
+  });
+  return null;
+}
 
 
 interface AUTH_REQUEST_STATE {
@@ -118,6 +193,15 @@ export async function handleAuthStart(req: Request): Promise<HandlerResponse>{
   const clientId = params.get('client_id') as string;
   const redirectUri = params.get('redirect_uri') as string;
   const codeChallenge = params.get('code_challenge') as string;
+
+  // Validate the redirect_uri against the client's registration BEFORE it enters
+  // the round-tripped state. This is the primary defense against an open redirect:
+  // an unregistered redirect_uri never makes it into the authorization code, so
+  // handleServerSideAuthRedirect can only ever 302 to a URI the client registered.
+  const redirectError = await validateClientRedirect(clientId, redirectUri, 'authorize');
+  if (redirectError) {
+    return redirectError;
+  }
 
   const paramsObj: AUTH_REQUEST_STATE = {
     response_type: 'code',
@@ -253,6 +337,13 @@ export async function handleServerSideAuthRedirect(req: Request): Promise<Handle
       ...(stateObj.nonce ? { nonce: stateObj.nonce } : {}),
     };
 
+    // Defense in depth: init-state round-trips through the browser, so re-check
+    // the redirect_uri against the client's registration before we 302 to it.
+    const redirectError = await validateClientRedirect(validatedState.client_id, validatedState.redirect_uri, 'server-redirect');
+    if (redirectError) {
+      return redirectError;
+    }
+
     const rediredctURL = new URL(validatedState.redirect_uri);
 
     if(validatedState.state) {
@@ -281,6 +372,98 @@ export async function handleServerSideAuthRedirect(req: Request): Promise<Handle
   } catch (error) {
     return oauthError(400, 'invalid_request', 'Invalid init-state parameter', 'server-redirect', { reason: 'init-state parse failed', detail: error instanceof Error ? error.message : String(error) });
   }
+}
+
+
+/**
+ * RFC 7591 Dynamic Client Registration, stateless.
+ *
+ * We don't persist the client anywhere: the returned `client_id` IS a JWE of the
+ * registered metadata (see client-registry.ts), so a later authorize/token
+ * request can recover and validate it with no lookup. This keeps registration
+ * working behind a plain round-robin load balancer with no shared store.
+ *
+ * `supportedScopes` is threaded in from the OAuth server config so requested
+ * scopes are sanitized down to what this AS actually grants (an unsupported
+ * scope is dropped rather than failing the whole registration).
+ */
+export async function handleClientRegistration(req: Request, supportedScopes: string[]): Promise<HandlerResponse> {
+  let body: Record<string, any>;
+  try {
+    body = JSON.parse(await req.text());
+  } catch (error) {
+    return oauthError(400, 'invalid_client_metadata', 'Registration body must be valid JSON', 'register', { detail: error instanceof Error ? error.message : String(error) });
+  }
+
+  const redirectUris = Array.isArray(body.redirect_uris)
+    ? body.redirect_uris.filter((u: unknown): u is string => typeof u === 'string')
+    : [];
+
+  // Intersect requested grant types with what we support; default to
+  // authorization_code when the client sends none.
+  const requestedGrantTypes: string[] = Array.isArray(body.grant_types) ? body.grant_types : ['authorization_code'];
+  const grantTypes = requestedGrantTypes.filter((g) => (SUPPORTED_GRANT_TYPES as readonly string[]).includes(g));
+  const effectiveGrantTypes = grantTypes.length > 0 ? grantTypes : ['authorization_code'];
+
+  // redirect_uris are required for the authorization_code flow (the only flow
+  // that redirects). RFC 7591 §3.2.2 uses `invalid_redirect_uri` for this.
+  if (effectiveGrantTypes.includes('authorization_code') && redirectUris.length === 0) {
+    return oauthError(400, 'invalid_redirect_uri', 'At least one redirect_uri is required for the authorization_code grant', 'register');
+  }
+
+  // Sanitize requested scopes to the supported set (drop the field if nothing
+  // remains) so an unsupported scope doesn't fail the whole registration.
+  let scope: string | undefined;
+  if (typeof body.scope === 'string') {
+    const allowed = body.scope.split(/\s+/).filter((s: string) => s && supportedScopes.includes(s));
+    scope = allowed.length > 0 ? allowed.join(' ') : undefined;
+  }
+
+  // Always infer rather than trust a client-supplied value: a client that
+  // mislabels a custom-scheme or loopback redirect as `web` would otherwise be
+  // stored as an invalid `web` + non-web-redirect combination that
+  // oidc-provider's client validation rejects if the client ever hits an
+  // oidc-handled endpoint (e.g. revocation).
+  const applicationType = inferApplicationType(redirectUris);
+
+  const client: Omit<RegisteredClient, 'client_id'> = {
+    redirect_uris: redirectUris,
+    grant_types: effectiveGrantTypes,
+    response_types: ['code'],
+    // Public PKCE clients: we issue no client_secret and don't persist one.
+    token_endpoint_auth_method: 'none',
+    application_type: applicationType,
+    ...(scope ? { scope } : {}),
+    ...(typeof body.client_name === 'string' ? { client_name: body.client_name } : {}),
+  };
+
+  const clientId = await createStatelessClientId(client);
+
+  debugLog('register: issued stateless client_id', { redirect_uris: redirectUris, application_type: applicationType, scope });
+
+  // RFC 7591 §3.2.1 success response. client_id_issued_at is informational; the
+  // registration never expires (no client_secret_expires_at needed for a public
+  // client), and revocation is via JWE_SECRET rotation.
+  const registration: Record<string, any> = {
+    client_id: clientId,
+    client_id_issued_at: Math.floor(Date.now() / 1000),
+    redirect_uris: redirectUris,
+    grant_types: effectiveGrantTypes,
+    response_types: ['code'],
+    token_endpoint_auth_method: 'none',
+    application_type: applicationType,
+    ...(scope ? { scope } : {}),
+    ...(typeof body.client_name === 'string' ? { client_name: body.client_name } : {}),
+  };
+
+  return {
+    statusCode: 201,
+    headers: {
+      'Content-Type': 'application/json',
+      'Cache-Control': 'no-cache, no-store, must-revalidate',
+    },
+    body: JSON.stringify(registration),
+  };
 }
 
 
