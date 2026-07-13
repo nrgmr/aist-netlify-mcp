@@ -1,7 +1,73 @@
 import { EncryptJWT, jwtDecrypt, compactDecrypt } from 'jose'
 import type { HandlerEvent, HandlerResponse } from "@netlify/functions";
 
-const JWE_SECRET = process.env.JWE_SECRET || 'mysecrtypekey1234567890123456789012345678901234567890'; // 256-bit key for A256GCM
+// The symmetric key that encrypts AND validates every token this server issues
+// (OAuth access/refresh tokens, the authorization code, and the /proxy/:token
+// JWE that carries the raw Netlify token). Whoever knows this key can both
+// decrypt intercepted tokens and forge new ones the server accepts, so a real
+// deployment MUST set a strong JWE_SECRET — we fail closed otherwise.
+//
+// The one exception is local development (a localhost issuer), where a fixed
+// dev key keeps `netlify dev` zero-config AND lets the separate edge-function
+// and serverless-function runtimes share a key. That key is intentionally
+// inert: it only activates on localhost, so it grants nothing on a deployed
+// instance even though it lives in the repo.
+const MIN_JWE_SECRET_LENGTH = 32; // 256 bits, the key size A256GCM requires
+const DEV_ONLY_LOCALHOST_KEY = 'dev-only-insecure-localhost-key-not-for-production-use';
+
+let cachedSecretKey: Uint8Array | null = null;
+let warnedAboutDevKey = false;
+
+/**
+ * True when the server is running against a localhost issuer (i.e. `netlify
+ * dev`), where a default key is acceptable because nothing is exposed.
+ */
+function isLocalIssuer(): boolean {
+  const issuer = process.env.OAUTH_ISSUER;
+  if (!issuer) {
+    return true; // getOAuthIssuer() defaults to http://localhost:8888
+  }
+  try {
+    const host = new URL(issuer).hostname;
+    return host === 'localhost' || host === '127.0.0.1' || host === '::1';
+  } catch {
+    return false;
+  }
+}
+
+function getSecretKey(): Uint8Array {
+  if (cachedSecretKey) {
+    return cachedSecretKey;
+  }
+
+  let password = process.env.JWE_SECRET;
+
+  if (!password) {
+    if (!isLocalIssuer()) {
+      // Fail closed on a real deployment rather than fall back to a key that
+      // would be public in this repository.
+      throw new Error(
+        'JWE_SECRET is not set. Refusing to issue or accept tokens with a default key. ' +
+        `Set JWE_SECRET to a random secret of at least ${MIN_JWE_SECRET_LENGTH} characters (e.g. \`openssl rand -base64 48\`).`,
+      );
+    }
+    if (!warnedAboutDevKey) {
+      console.warn(
+        '[JWE] JWE_SECRET is not set — using an insecure dev-only key because the issuer is localhost. ' +
+        'NEVER run a deployed instance without a strong JWE_SECRET.',
+      );
+      warnedAboutDevKey = true;
+    }
+    password = DEV_ONLY_LOCALHOST_KEY;
+  } else if (password.length < MIN_JWE_SECRET_LENGTH) {
+    throw new Error(
+      `JWE_SECRET is too short (${password.length} chars). It must be at least ${MIN_JWE_SECRET_LENGTH} characters (256 bits).`,
+    );
+  }
+
+  cachedSecretKey = new TextEncoder().encode(password.padEnd(32, '0').slice(0, 32)); // A256GCM needs exactly 32 bytes
+  return cachedSecretKey;
+}
 
 export function getOAuthIssuer(): string {
   // Use the environment variable or default to localhost
@@ -107,9 +173,8 @@ export function returnNeedsAuthResponse(opts?: { error?: string; errorDescriptio
 }
 
 export async function createJWE(payload: Record<string, any>, expiresIn: string = '1h'): Promise<string> {
-  const password = JWE_SECRET
-  const secret = new TextEncoder().encode(password.padEnd(32, '0').slice(0, 32)) // Ensure 32 bytes
-  
+  const secret = getSecretKey()
+
   const jwe = await new EncryptJWT(payload)
     .setProtectedHeader({ alg: 'dir', enc: 'A256GCM' })
     .setIssuedAt() // record when the token was minted so expiry can be diagnosed
@@ -134,8 +199,7 @@ async function peekClaims(jwe: string, secret: Uint8Array): Promise<Record<strin
 }
 
 export async function decryptJWE(jwe: string) {
-  const password = JWE_SECRET
-  const secret = new TextEncoder().encode(password.padEnd(32, '0').slice(0, 32)) // Ensure 32 bytes
+  const secret = getSecretKey()
 
   try {
     const { payload } = await jwtDecrypt(jwe, secret)
