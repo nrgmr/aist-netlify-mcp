@@ -3,7 +3,7 @@
 // Off by default. Set MCP_VERBOSE_LOGGING=true (or 1/yes) to log full
 // per-transaction detail across the MCP, OAuth, and proxy functions. This is a
 // diagnostic switch — leave it off in steady state. Errors are always logged
-// regardless of this flag; debugLog()/verbose detail is the only thing it gates.
+// regardless of this flag; log.debug()/verbose detail is the only thing it gates.
 //
 // Even in verbose mode, secrets are masked: bodies go through safeBodySummary()
 // and tokens through maskToken(). We never log raw client secrets or full tokens.
@@ -19,17 +19,6 @@ export function isVerboseLogging(): boolean {
   } catch {
     // process may be unavailable in some runtimes (e.g. edge); default to off.
     return false;
-  }
-}
-
-// Logs only when verbose logging is enabled. Use for per-transaction detail that
-// would otherwise be noise in steady state.
-export function debugLog(label: string, details?: unknown): void {
-  if (!isVerboseLogging()) return;
-  if (details === undefined) {
-    console.log(`[verbose] ${label}`);
-  } else {
-    console.log(`[verbose] ${label}`, details);
   }
 }
 

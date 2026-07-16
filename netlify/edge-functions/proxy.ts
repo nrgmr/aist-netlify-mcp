@@ -1,5 +1,5 @@
 import { decryptJWE } from "../functions/mcp-server/utils.ts";
-import { debugLog } from "../functions/mcp-server/logging.ts";
+import { log, withLogContext, addLogContext, newRequestId } from "../functions/mcp-server/logger.ts";
 import {Config, Context} from '@netlify/edge-functions';
 
 // Escape regex metacharacters so an allowed-path template is matched literally
@@ -14,7 +14,19 @@ function escapeRegExp(value: string): string {
 export default async (req: Request, ctx: Context) => {
   const token = ctx.params?.token as string;
 
-  debugLog('proxy request', { method: req.method, url: req.url, hasToken: !!token });
+  // Edge runs in its own isolate, so establish a fresh log context here.
+  return withLogContext(
+    {
+      service: 'proxy',
+      requestId: newRequestId(),
+      httpMethod: req.method,
+    },
+    () => handleProxy(req, token),
+  );
+};
+
+async function handleProxy(req: Request, token: string): Promise<Response> {
+  log.debug('proxy request', { url: req.url, hasToken: !!token });
 
   if (!token) {
     return new Response('Unauthorized', { status: 401 });
@@ -23,7 +35,14 @@ export default async (req: Request, ctx: Context) => {
   if (!decryptedToken || typeof decryptedToken.accessToken !== 'string') {
     return new Response('Unauthorized', { status: 401 });
   }
-  
+
+  // Attribute the proxied call to the user once the JWE identity work lands
+  // (identity is embedded at token-issue time); harmless no-op until then.
+  if (decryptedToken.identity && typeof decryptedToken.identity === 'object') {
+    const { userId, teamId } = decryptedToken.identity as { userId?: string; teamId?: string };
+    addLogContext({ userId, teamId });
+  }
+
   const requestedPath = req.url.split(token)[1];
 
   // Normalize BEFORE the allow-list check so we validate exactly what we forward.
@@ -45,7 +64,7 @@ export default async (req: Request, ctx: Context) => {
     });
 
     if (!isAllowed) {
-      console.error('Unauthorized access attempt to path:', normalizedPath, decryptedToken.apisAllowed);
+      log.error('Unauthorized access attempt to path', { normalizedPath, apisAllowed: decryptedToken.apisAllowed });
       return new Response('Forbidden', { status: 403 });
     }
   }
@@ -59,9 +78,9 @@ export default async (req: Request, ctx: Context) => {
     body: req.body,
     redirect: 'manual', // prevent automatic redirects
   });
-  debugLog('proxy forwarding', { to: url.toString(), method: updatedReq.method });
+  log.debug('proxy forwarding', { to: url.toString(), method: updatedReq.method });
   return fetch(updatedReq);
-};
+}
 
 export const config: Config = {
   path: '/proxy/:token/*'

@@ -1,5 +1,6 @@
 import { appendErrorToLog } from "../utils/logging.js"
 import { unauthenticatedFetch } from "../utils/api-networking.ts";
+import { log } from "../../netlify/functions/mcp-server/logger.js";
 
 export interface ConsumersData {
   consumers: ConsumerConfig[]
@@ -88,7 +89,7 @@ export async function getNetlifyCodingContext(contextKey: string): Promise<Conte
   const consumer = await getContextConsumerConfig();
 
   if(!consumer || !consumer.contextScopes[contextKey]?.endpoint){
-    console.error('unable to find the context you are looking for. Check docs.netlify.com for more information.');
+    log.error('unable to find the context you are looking for. Check docs.netlify.com for more information.');
     return;
   }
 
@@ -101,7 +102,7 @@ export async function getNetlifyCodingContext(contextKey: string): Promise<Conte
     data = await response.text() as string;
 
     if(!data){
-      console.error('unable to find the context you are looking for. Check docs.netlify.com for more information.');
+      log.error('unable to find the context you are looking for. Check docs.netlify.com for more information.');
       return;
     }
 
@@ -117,7 +118,7 @@ export async function getNetlifyCodingContext(contextKey: string): Promise<Conte
     };
 
   } catch (error) {
-    console.error('Error fetching context:', error);
+    log.error('Error fetching context', { err: error });
   }
 
   return contextCache[contextKey]?.data;

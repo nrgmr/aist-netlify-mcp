@@ -1,5 +1,6 @@
 import { EncryptJWT, jwtDecrypt, compactDecrypt } from 'jose'
 import type { HandlerEvent, HandlerResponse } from "@netlify/functions";
+import { log } from "./logger.ts";
 
 // The symmetric key that encrypts AND validates every token this server issues
 // (OAuth access/refresh tokens, the authorization code, and the /proxy/:token
@@ -52,7 +53,7 @@ function getSecretKey(): Uint8Array {
       );
     }
     if (!warnedAboutDevKey) {
-      console.warn(
+      log.warn(
         '[JWE] JWE_SECRET is not set — using an insecure dev-only key because the issuer is localhost. ' +
         'NEVER run a deployed instance without a strong JWE_SECRET.',
       );
@@ -226,7 +227,7 @@ export async function decryptJWE(jwe: string) {
     const { payload } = await jwtDecrypt(jwe, secret)
     return payload
   } catch (error: any) {
-    const log: Record<string, unknown> = {
+    const errorDetails: Record<string, unknown> = {
       message: error?.message || '',
       reason: error?.reason || '',
       code: error?.code || '',
@@ -240,20 +241,20 @@ export async function decryptJWE(jwe: string) {
       const claims = await peekClaims(jwe, secret);
       const now = Math.floor(Date.now() / 1000);
       if (claims) {
-        log.nowEpoch = now;
-        log.iat = claims.iat ?? null;
-        log.exp = claims.exp ?? null;
+        errorDetails.nowEpoch = now;
+        errorDetails.iat = claims.iat ?? null;
+        errorDetails.exp = claims.exp ?? null;
         if (typeof claims.exp === 'number') {
-          log.expiredBySeconds = now - claims.exp; // negative ⇒ skew (not actually expired)
+          errorDetails.expiredBySeconds = now - claims.exp; // negative ⇒ skew (not actually expired)
         }
         if (typeof claims.exp === 'number' && typeof claims.iat === 'number') {
-          log.tokenLifetimeSeconds = claims.exp - claims.iat;
-          log.ageSeconds = now - claims.iat;
+          errorDetails.tokenLifetimeSeconds = claims.exp - claims.iat;
+          errorDetails.ageSeconds = now - claims.iat;
         }
       }
     }
 
-    console.error('Failed to decrypt JWE:', log);
+    log.error('Failed to decrypt JWE', errorDetails);
     throw new Error('Invalid JWE token. Please reauthenticate or reconnect to the Netlify MCP server.')
   }
 }

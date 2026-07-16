@@ -1,6 +1,6 @@
 import { createJWE, decryptJWE } from "./utils.ts";
 import { getClientById } from "./oauth-clients.ts";
-import { debugLog } from "./logging.ts";
+import { log } from "./logger.ts";
 
 // Stateless dynamic client registration.
 //
@@ -143,7 +143,7 @@ export async function resolveClient(clientId: string | null | undefined): Promis
     }
     // Decrypted with our key but isn't a registration payload (e.g. an access
     // token presented where a client_id was expected) — not a usable client.
-    debugLog('resolveClient: decrypted id is not a client registration', { token_use: payload?.token_use });
+    log.debug('resolveClient: decrypted id is not a client registration', { token_use: payload?.token_use });
   } catch {
     // Not a JWE we can read: a legacy opaque client_id or a foreign id.
   }

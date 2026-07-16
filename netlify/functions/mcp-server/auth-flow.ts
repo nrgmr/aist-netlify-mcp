@@ -1,7 +1,8 @@
 import { HandlerResponse } from "@netlify/functions";
 import { createHash } from "crypto";
 import { createJWE, decryptJWE, getOAuthIssuer } from "./utils.ts";
-import { debugLog, maskToken } from "./logging.ts";
+import { maskToken } from "./logging.ts";
+import { log } from "./logger.ts";
 import {
   createStatelessClientId,
   inferApplicationType,
@@ -56,7 +57,7 @@ async function validateClientRedirect(
   const { client, source } = await resolveClient(clientId);
 
   if (client && isRedirectUriAllowed(client, redirectUri)) {
-    debugLog(`${op}: redirect_uri validated`, { client_id: clientId, source });
+    log.debug(`${op}: redirect_uri validated`, { client_id: clientId, source });
     return null;
   }
 
@@ -67,9 +68,9 @@ async function validateClientRedirect(
     return oauthError(400, error, description, op, { client_id: clientId, source, redirect_uri: redirectUri });
   }
 
-  // Log-only mode: surface unconditionally (not debugLog) so operators can see
+  // Log-only mode: surface unconditionally (not log.debug) so operators can see
   // this traffic in steady state and decide when it's safe to enforce.
-  console.warn('[oauth] redirect_uri not validated (allowed; set DCR_REJECT_UNKNOWN_CLIENTS=true to enforce)', {
+  log.warn('[oauth] redirect_uri not validated (allowed; set DCR_REJECT_UNKNOWN_CLIENTS=true to enforce)', {
     op,
     source,
     client_id: maskToken(clientId),
@@ -147,7 +148,7 @@ function oauthError(
   op?: string,
   context?: Record<string, unknown>,
 ): HandlerResponse {
-  console.error('oauth error', {
+  log.error('oauth error', {
     op: op ?? 'unknown',
     statusCode,
     error,
@@ -173,7 +174,7 @@ export async function handleAuthStart(req: Request): Promise<HandlerResponse>{
   const parsedUrl = new URL(req.url);
   const params = parsedUrl.searchParams;
   
-  debugLog('authorize start', { client_id: params.get('client_id'), redirect_uri: params.get('redirect_uri'), scope: params.get('scope') });
+  log.debug('authorize start', { client_id: params.get('client_id'), redirect_uri: params.get('redirect_uri'), scope: params.get('scope') });
 
   const missingParams = AUTH_REQUIRED_PARAMS.filter(param => !params.get(param));
   if (missingParams.length > 0) {
@@ -355,7 +356,7 @@ export async function handleServerSideAuthRedirect(req: Request): Promise<Handle
 
     // TODO: future, we will add specific tools and other context to this for
     // downstream validation
-    debugLog('server redirect: issuing authorization code', { client_id: validatedState.client_id, redirect_uri: validatedState.redirect_uri, scope: validatedState.scope });
+    log.debug('server redirect: issuing authorization code', { client_id: validatedState.client_id, redirect_uri: validatedState.redirect_uri, scope: validatedState.scope });
 
     const jwe = await createJWE({state: validatedState, accessToken: token} satisfies CODE_JWE_PAYLOAD);
 
@@ -439,7 +440,7 @@ export async function handleClientRegistration(req: Request, supportedScopes: st
 
   const clientId = await createStatelessClientId(client);
 
-  debugLog('register: issued stateless client_id', { redirect_uris: redirectUris, application_type: applicationType, scope });
+  log.debug('register: issued stateless client_id', { redirect_uris: redirectUris, application_type: applicationType, scope });
 
   // RFC 7591 §3.2.1 success response. client_id_issued_at is informational; the
   // registration never expires (no client_secret_expires_at needed for a public
@@ -475,7 +476,7 @@ export async function handleCodeExchange(req: Request): Promise<HandlerResponse>
   const bodyParams = new URLSearchParams(body);
   const grantType = bodyParams.get('grant_type') || 'authorization_code';
 
-  debugLog('token exchange', { grantType, client_id: bodyParams.get('client_id'), hasAuthHeader: !!req.headers.get('authorization') });
+  log.debug('token exchange', { grantType, client_id: bodyParams.get('client_id'), hasAuthHeader: !!req.headers.get('authorization') });
 
   // Handle refresh_token grant type
   if (grantType === 'refresh_token') {
@@ -560,7 +561,7 @@ export async function handleCodeExchange(req: Request): Promise<HandlerResponse>
     tokenResponse.refresh_token = refreshTokenJWE;
   }
 
-  debugLog('token issued', { client_id: clientId, hasOfflineAccess, refreshTokenIssued: hasOfflineAccess });
+  log.debug('token issued', { client_id: clientId, hasOfflineAccess, refreshTokenIssued: hasOfflineAccess });
 
   return {
     statusCode: 200,
@@ -605,7 +606,7 @@ async function handleRefreshTokenGrant(bodyParams: URLSearchParams): Promise<Han
     '7d'
   );
 
-  debugLog('refresh token grant: issued new tokens', {});
+  log.debug('refresh token grant: issued new tokens', {});
 
   return {
     statusCode: 200,

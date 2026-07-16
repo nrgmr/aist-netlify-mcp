@@ -1,5 +1,6 @@
 import type { Context } from '@netlify/edge-functions';
 import { isVerboseLogging, maskToken, safeBodySummary } from '../functions/mcp-server/logging.ts';
+import { log, withLogContext, newRequestId } from '../functions/mcp-server/logger.ts';
 
 // Catch-all request/response logger. Runs in front of every request (declared
 // first in netlify.toml so it wraps the proxy edge function and all regular
@@ -22,55 +23,62 @@ export default async (request: Request, context: Context) => {
   }
 
   const url = new URL(request.url);
-  const label = `${request.method} ${url.pathname}`;
 
-  // Read the request body via a clone so the original is left intact for
-  // downstream handlers (context.next()). Bodies carry secrets (tool-call
-  // password args, OAuth codes), so they are redacted before logging, then
-  // truncated — redact-first so truncation can never split around a secret.
-  let reqBody = '';
-  try {
-    if (request.body) {
-      reqBody = truncate(JSON.stringify(safeBodySummary(await request.clone().text())));
-    }
-  } catch (err) {
-    reqBody = `<unreadable request body: ${err instanceof Error ? err.message : String(err)}>`;
-  }
+  return withLogContext(
+    {
+      service: 'edge',
+      requestId: newRequestId(),
+      httpMethod: request.method,
+      path: url.pathname,
+    },
+    async () => {
+      // Read the request body via a clone so the original is left intact for
+      // downstream handlers (context.next()). Bodies carry secrets (tool-call
+      // password args, OAuth codes), so they are redacted before logging, then
+      // truncated — redact-first so truncation can never split around a secret.
+      let reqBody = '';
+      try {
+        if (request.body) {
+          reqBody = truncate(JSON.stringify(safeBodySummary(await request.clone().text())));
+        }
+      } catch (err) {
+        reqBody = `<unreadable request body: ${err instanceof Error ? err.message : String(err)}>`;
+      }
 
-  console.log('[edge] →', {
-    label,
-    query: url.search || undefined,
-    contentType: request.headers.get('content-type') || undefined,
-    auth: maskToken(request.headers.get('authorization')) || undefined,
-    body: reqBody || undefined,
-  });
+      log.debug('edge request', {
+        query: url.search || undefined,
+        contentType: request.headers.get('content-type') || undefined,
+        auth: maskToken(request.headers.get('authorization')) || undefined,
+        body: reqBody || undefined,
+      });
 
-  // Continue down the chain (other edge functions / the origin function).
-  const response = await context.next();
+      // Continue down the chain (other edge functions / the origin function).
+      const response = await context.next();
 
-  // Read the response body. Skip buffering for streaming responses (SSE) and
-  // anything large, so we don't block or hold big payloads in memory.
-  const resContentType = response.headers.get('content-type') || '';
-  const resLen = Number(response.headers.get('content-length') || '0');
-  let resBody = '';
-  if (resContentType.includes('text/event-stream')) {
-    resBody = '<streamed: text/event-stream, body not buffered>';
-  } else if (resLen > MAX_BUFFER) {
-    resBody = `<skipped: ${resLen} bytes>`;
-  } else {
-    try {
-      resBody = truncate(await response.clone().text());
-    } catch (err) {
-      resBody = `<unreadable response body: ${err instanceof Error ? err.message : String(err)}>`;
-    }
-  }
+      // Read the response body. Skip buffering for streaming responses (SSE) and
+      // anything large, so we don't block or hold big payloads in memory.
+      const resContentType = response.headers.get('content-type') || '';
+      const resLen = Number(response.headers.get('content-length') || '0');
+      let resBody = '';
+      if (resContentType.includes('text/event-stream')) {
+        resBody = '<streamed: text/event-stream, body not buffered>';
+      } else if (resLen > MAX_BUFFER) {
+        resBody = `<skipped: ${resLen} bytes>`;
+      } else {
+        try {
+          resBody = truncate(await response.clone().text());
+        } catch (err) {
+          resBody = `<unreadable response body: ${err instanceof Error ? err.message : String(err)}>`;
+        }
+      }
 
-  console.log('[edge] ←', {
-    label,
-    status: response.status,
-    contentType: resContentType || undefined,
-    body: resBody || undefined,
-  });
+      log.debug('edge response', {
+        status: response.status,
+        contentType: resContentType || undefined,
+        body: resBody || undefined,
+      });
 
-  return response;
+      return response;
+    },
+  );
 };

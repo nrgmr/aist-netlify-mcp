@@ -6,7 +6,9 @@ import { handleAuthStart, handleClientRegistration, handleClientSideAuthExchange
 import { resolveClient } from "./mcp-server/client-registry.ts";
 import { getOAuthIssuer, addCommonHeadersToHandlerResp, headersToHeadersObject, getParsedUrl, urlsToHTTP } from "./mcp-server/utils.ts";
 import { getClientById, staticClients } from "./mcp-server/oauth-clients.ts";
-import { debugLog, safeBodySummary } from "./mcp-server/logging.ts";
+import { safeBodySummary } from "./mcp-server/logging.ts";
+import { log, withLogContext, newRequestId } from "./mcp-server/logger.ts";
+import { getPackageVersion } from "../../src/utils/version.ts";
 
 const authorizationEndpointPath = '/oauth-server/auth';
 const tokenEndpointPath = '/oauth-server/token';
@@ -137,7 +139,7 @@ const configuration: Configuration = {
 
   // For a real deployment, add findAccount, adapter, and interaction config
   renderError(ctx, out, error) {
-    console.error('OIDC Provider Error:', error);
+    log.error('OIDC provider error', { err: error });
     ctx.body = {
       error: 'server_error',
       error_description: 'An internal server error occurred'
@@ -177,7 +179,7 @@ async function invokeOIDCProvider(req: HandlerEvent, context: HandlerContext, ov
 
 const oAuthHandler: Handler = async (req, context) => {
 
-  debugLog('oauth request', { method: req.httpMethod, url: req.rawUrl });
+  log.debug('oauth request', { url: req.rawUrl });
 
   // Handle CORS preflight requests
   if(req.httpMethod === 'OPTIONS') {
@@ -219,7 +221,7 @@ const oAuthHandler: Handler = async (req, context) => {
   // client-registry), so nothing needs persisting. Scope sanitization and
   // application_type inference happen inside the handler.
   if ((isRegistrationPath || isRegisterAlias) && req.httpMethod === 'POST') {
-    debugLog('registration request', safeBodySummary(req.body));
+    log.debug('registration request', { body: safeBodySummary(req.body) });
     return await handleClientRegistration(reqObj, SUPPORTED_SCOPES);
   }
 
@@ -300,11 +302,9 @@ const oAuthHandler: Handler = async (req, context) => {
   const resp = await invokeOIDCProvider(req, context, invocationOverrides);
 
   if(resp.statusCode === 400){
-    console.error({
-      error: 'Bad Request',
-      message: 'Invalid request to OIDC provider',
+    log.error('Invalid request to OIDC provider', {
       statusCode: resp.statusCode,
-      path: parsedUrl.pathname,
+      oidcPath: parsedUrl.pathname,
       requestBody: safeBodySummary(req.body),
       responseBody: resp.body,
     })
@@ -319,10 +319,23 @@ const oAuthHandler: Handler = async (req, context) => {
 
 
 export const handler: Handler = async (req, context) => {
-  const resp = await oAuthHandler(req, context);
-  return resp ? addCommonHeadersToHandlerResp(resp) : {
-    statusCode: 500,
-    body: JSON.stringify({ error: 'Internal Server Error' }),
-    headers: { 'Content-Type': 'application/json' }
-  };
+  // Establish request-scoped log context for the whole OAuth request so every
+  // line from oAuthHandler and the auth-flow handlers it calls is correlated.
+  return withLogContext(
+    {
+      service: 'oauth',
+      requestId: newRequestId(),
+      version: getPackageVersion(),
+      httpMethod: req.httpMethod,
+      path: req.path,
+    },
+    async () => {
+      const resp = await oAuthHandler(req, context);
+      return resp ? addCommonHeadersToHandlerResp(resp) : {
+        statusCode: 500,
+        body: JSON.stringify({ error: 'Internal Server Error' }),
+        headers: { 'Content-Type': 'application/json' }
+      };
+    }
+  );
 }

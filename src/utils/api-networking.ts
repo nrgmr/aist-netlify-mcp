@@ -4,6 +4,7 @@ import envPaths from 'env-paths';
 import { runCommand } from './cmd.js';
 import { appendToLog } from './logging.js';
 import { decryptJWE } from '../../netlify/functions/mcp-server/utils.js';
+import { log } from '../../netlify/functions/mcp-server/logger.js';
 
 interface APIInteractionOptions {
   pagination?: boolean;
@@ -75,7 +76,7 @@ export const getNetlifyAccessToken = async (request?: Request): Promise<string> 
         if(decrypted && typeof decrypted.accessToken === 'string') {
           token = decrypted.accessToken;
         } else {
-          console.error(`decrypted JWE did not contain accessToken. fields it does have:`, Object.keys(decrypted));
+          log.error('decrypted JWE did not contain accessToken', { fields: Object.keys(decrypted) });
         }
       }
 
