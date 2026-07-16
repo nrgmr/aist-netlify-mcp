@@ -10,58 +10,71 @@ import { bindTools } from "../../src/tools/index.ts";
 import { registerClaudeDesignImportTool } from "../../src/tools/design-import/import-claude-design.ts";
 import { userIsAuthenticated, UNAUTHED_ERROR_PREFIX } from "../../src/utils/api-networking.ts";
 import { isClaudeMCPClient } from "../../src/utils/client-detection.ts";
-import { debugLog, isVerboseLogging, maskToken, redactSensitive } from "./mcp-server/logging.ts";
+import { isVerboseLogging, maskToken, redactSensitive } from "./mcp-server/logging.ts";
+import { log, withLogContext, addLogContext, newRequestId } from "./mcp-server/logger.ts";
 import {Config} from "@netlify/functions";
 
 // Netlify serverless function handler
 export default async (req: Request) => {
 
-  try {
+  const url = new URL(req.url);
 
-    debugLog('mcp request', {
-      method: req.method,
-      url: req.url,
-      auth: maskToken(req.headers.get('Authorization')),
-    });
+  // Establish the request-scoped log context up front so every line — including
+  // ones emitted deep in tool/API code — carries service/requestId/version and
+  // the HTTP method+path. Auth later enriches this with userId/teamId.
+  return withLogContext(
+    {
+      service: 'mcp',
+      requestId: newRequestId(),
+      version: getPackageVersion(),
+      httpMethod: req.method,
+      path: url.pathname,
+    },
+    async () => {
+      try {
 
-    // Handle different HTTP methods
-    if (req.method === "POST") {
-      return handleMCPPost(req);
-    } else if (req.method === "GET") {
-      return handleMCPGet();
-    } else if (req.method === "DELETE") {
-      return handleMCPDelete();
-    } else if (req.method === "OPTIONS") { 
-      return new Response('', {
-        status: 200,
-        headers: {
-          "Access-Control-Allow-Origin": "*",
-          "Access-Control-Allow-Methods": "*",
-          "Access-Control-Allow-Headers": "*"
+        log.debug('mcp request', { auth: maskToken(req.headers.get('Authorization')) });
+
+        // Handle different HTTP methods
+        if (req.method === "POST") {
+          return await handleMCPPost(req);
+        } else if (req.method === "GET") {
+          return handleMCPGet();
+        } else if (req.method === "DELETE") {
+          return handleMCPDelete();
+        } else if (req.method === "OPTIONS") {
+          return new Response('', {
+            status: 200,
+            headers: {
+              "Access-Control-Allow-Origin": "*",
+              "Access-Control-Allow-Methods": "*",
+              "Access-Control-Allow-Headers": "*"
+            }
+          });
+        } else {
+          return new Response("Method not allowed", { status: 405 });
         }
-      });
-    } else {
-      return new Response("Method not allowed", { status: 405 });
-    }
 
-  } catch (error) {
+      } catch (error) {
 
-    console.error("MCP error:", error);
-    return new Response(
-      JSON.stringify({
-        jsonrpc: "2.0",
-        error: {
-          code: -32603,
-          message: "Internal server error",
-        },
-        id: null,
-      }),
-      {
-        status: 500,
-        headers: { "Content-Type": "application/json" }
+        log.error("MCP error", { err: error });
+        return new Response(
+          JSON.stringify({
+            jsonrpc: "2.0",
+            error: {
+              code: -32603,
+              message: "Internal server error",
+            },
+            id: null,
+          }),
+          {
+            status: 500,
+            headers: { "Content-Type": "application/json" }
+          }
+        );
       }
-    );
-  }
+    }
+  );
 };
 
 
@@ -81,7 +94,7 @@ async function handleMCPPost(req: Request) {
   try {
     body = JSON.parse(raw);
   } catch (error) {
-    console.error('Invalid JSON in MCP POST body', {
+    log.error('Invalid JSON in MCP POST body', {
       bytes: raw.length,
       contentType: req.headers.get('content-type'),
       userAgent: req.headers.get('user-agent'),
@@ -89,20 +102,26 @@ async function handleMCPPost(req: Request) {
     return jsonRpcError(400, -32700, 'Parse error: invalid JSON body');
   }
 
+  // Fold the MCP call identity into the request context so every subsequent line
+  // (auth, tool binding, response) is attributed to this JSON-RPC call.
+  addLogContext({
+    mcpMethod: body?.method,
+    mcpId: body?.id,
+    clientInfoName: body?.params?.clientInfo?.name,
+  });
+
   // Guard the redaction walk behind the flag: redactSensitive() recurses the
   // whole (attacker-controlled, pre-auth) body, and its argument is evaluated
-  // eagerly before debugLog checks the flag, so an inner check wouldn't spare
-  // that work in steady state.
+  // eagerly before log.debug checks the flag, so relying on the inner check
+  // wouldn't spare that work in steady state.
   if (isVerboseLogging()) {
-    debugLog('mcp post body', { method: body?.method, id: body?.id, params: redactSensitive(body?.params) });
+    log.debug('mcp post body', { params: redactSensitive(body?.params) });
   }
 
   // Request headers relevant to StreamableHTTP/MCP negotiation. `accept` must
   // include both application/json and text/event-stream or the transport rejects
   // the request; session/protocol headers help correlate the handshake.
-  debugLog('mcp post request', {
-    method: body?.method,
-    id: body?.id,
+  log.debug('mcp post request', {
     accept: req.headers.get('accept'),
     contentType: req.headers.get('content-type'),
     mcpSessionId: req.headers.get('mcp-session-id'),
@@ -113,13 +132,12 @@ async function handleMCPPost(req: Request) {
     origin: req.headers.get('origin'),
     referer: req.headers.get('referer'),
     auth: maskToken(req.headers.get('Authorization')),
-    clientInfoName: body?.params?.clientInfo?.name,
   });
 
   // Check for verbose mode via query parameter
   const url = new URL(req.url);
   const verboseMode = url.searchParams.get('verbose') === 'true';
-  debugLog('mcp post handling', { verboseMode });
+  log.debug('mcp post handling', { verboseMode });
 
   // Create a new Request with the body as a string to avoid re-reading issues
   // toReqRes will try to read the body, so we need to provide a fresh request
@@ -139,12 +157,12 @@ async function handleMCPPost(req: Request) {
     // If a token was presented but failed validation, signal invalid_token so the
     // client refreshes; if none was sent, send a bare challenge to start auth.
     const tokenPresented = !!req.headers.get('authorization');
-    debugLog('mcp auth failed', { method: body?.method, id: body?.id, tokenPresented });
+    log.debug('mcp auth failed', { tokenPresented });
     return returnNeedsAuthResponse(tokenPresented
       ? { error: 'invalid_token', errorDescription: 'The access token is invalid or expired' }
       : undefined);
   }
-  debugLog('mcp authenticated', { method: body?.method, id: body?.id });
+  log.debug('mcp authenticated');
 
   const server = new McpServer({
     name: "netlify",
@@ -190,7 +208,7 @@ async function handleMCPPost(req: Request) {
     await bindTools(server, req, verboseMode);
   } catch (error: any) {
 
-    console.error('Failed to bind tools to MCP server:', error);
+    log.error('Failed to bind tools to MCP server', { err: error });
     return new Response('Failed to bind tools to MCP server', {status: 500});
   }
 
@@ -199,7 +217,7 @@ async function handleMCPPost(req: Request) {
   });
 
   transport.onerror = (error) => {
-    console.error("Transport error:", error);
+    log.error("Transport error", { err: error });
   };
 
   await server.connect(transport);
@@ -215,9 +233,7 @@ async function handleMCPPost(req: Request) {
   try {
     const returnData = await response.clone().text();
 
-    debugLog('mcp response', {
-      method: body?.method,
-      id: body?.id,
+    log.debug('mcp response', {
       status: response.status,
       contentType: response.headers.get('content-type'),
       // truncate to keep logs readable; enough to see the JSON-RPC result/error shape
@@ -227,12 +243,12 @@ async function handleMCPPost(req: Request) {
     if(returnData.includes(UNAUTHED_ERROR_PREFIX)){
       // A downstream Netlify call rejected the token mid-request — it's no longer
       // valid, so flag invalid_token rather than a bare challenge.
-      console.error("Unauthorized error detected in response:", returnData);
+      log.error("Unauthorized error detected in response");
       return returnNeedsAuthResponse({ error: 'invalid_token', errorDescription: 'The Netlify access token is no longer valid' });
     }
 
   } catch (error) {
-    console.error("Error parsing response JSON:", error);
+    log.error("Error parsing response JSON", { err: error });
   }
 
   return addCORSHeadersToFetchResp(response);
