@@ -31,11 +31,26 @@ import { extensionDomainTools } from './extension-tools/index.js';
 import { checkCompatibility } from '../utils/compatibility.js';
 import { getNetlifyAccessToken, NetlifyUnauthError } from '../utils/api-networking.js';
 import { appendToLog } from '../utils/logging.js';
+import { redactSensitive } from '../../netlify/functions/mcp-server/logging.js';
 import { categorizeToolsByReadWrite } from './tool-utils.js';
 import { z } from 'zod';
 import type { DomainTool } from './types.js';
 
 const listOfDomainTools = [userDomainTools, deployDomainTools, teamDomainTools, projectDomainTools, extensionDomainTools];
+
+const stringifyForLog = (value: unknown): string => {
+  let parsedValue = value;
+
+  if (typeof value === 'string') {
+    try {
+      parsedValue = JSON.parse(value);
+    } catch {
+      return value;
+    }
+  }
+
+  return JSON.stringify(redactSensitive(parsedValue));
+};
 
 const toSelectorSchema = (domainTool: DomainTool<any>) => {
   return z.object({
@@ -123,11 +138,11 @@ const registerDomainTools = (
           };
         }
 
-        appendToLog(`${toolName} operation: ${JSON.stringify(args)}`);
+        appendToLog(`${toolName} operation: ${stringifyForLog(args)}`);
 
         const result = await tool.cb(args[0], {request: remoteMCPRequest, isRemoteMCP: !!remoteMCPRequest});
 
-        appendToLog(`${domain} operation result: ${JSON.stringify(result)}`);
+        appendToLog(`${domain} operation result: ${stringifyForLog(result)}`);
 
         return {
           content: [{ type: "text" as const, text: JSON.stringify(result) }]
@@ -167,7 +182,7 @@ const registerDomainTools = (
         };
       }
 
-      appendToLog(`${toolName} operation: ${JSON.stringify(args)}`);
+      appendToLog(`${toolName} operation: ${stringifyForLog(args)}`);
 
       const selectedSchema = args[0]?.selectSchema as any;
 
@@ -189,7 +204,7 @@ const registerDomainTools = (
 
       const result = await subtool.cb(selectedSchema.params || {}, {request: remoteMCPRequest, isRemoteMCP: !!remoteMCPRequest});
 
-      appendToLog(`${domain} operation result: ${JSON.stringify(result)}`);
+      appendToLog(`${domain} operation result: ${stringifyForLog(result)}`);
 
       return {
         content: [{ type: "text" as const, text: JSON.stringify(result) }]

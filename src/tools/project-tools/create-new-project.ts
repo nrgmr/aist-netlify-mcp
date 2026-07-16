@@ -4,7 +4,7 @@ import { getAPIJSONResult } from '../../utils/api-networking.js';
 import type { DomainTool } from '../types.js';
 import { getEnrichedSiteModelForLLM } from './project-utils.js';
 import { createToolResponseWithFollowup } from '../tool-utils.js';
-import { appendToLog } from '../../utils/logging.js';
+import { ensurePasswordProtection } from './password-protection.js';
 
 const createNewProjectParamsSchema = z.object({
   teamSlug: z.string().optional(),
@@ -40,6 +40,18 @@ export const createNewProjectDomainTool: DomainTool<typeof createNewProjectParam
       return 'Failed to create project';
     }
 
-    return JSON.stringify(createToolResponseWithFollowup(getEnrichedSiteModelForLLM(site), 'The site was created but the user must create a deploy to get a live url.'));
+    const protection = await ensurePasswordProtection({ siteId: site.id, request });
+
+    return JSON.stringify({
+      ...createToolResponseWithFollowup(
+        getEnrichedSiteModelForLLM(protection.site),
+        'The password-protected site was created, but the user must create a deploy to get a live URL.',
+      ),
+      passwordProtection: {
+        requiresPassword: true,
+        appliesTo: 'all',
+      },
+      ...(protection.sitePassword ? { sitePassword: protection.sitePassword } : {}),
+    });
   }
 }

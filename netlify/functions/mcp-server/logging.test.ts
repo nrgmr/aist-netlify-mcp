@@ -14,6 +14,11 @@ test('redactSensitive masks secrets nested in tool-call arguments', () => {
   assert.equal(params.arguments.password, 'hunter2');
 });
 
+test('redactSensitive masks generated site-password fields', () => {
+  const safe = redactSensitive({ passwordValue: 'banana123', sitePassword: 'tangerine950' });
+  assert.deepEqual(safe, { passwordValue: '[redacted]', sitePassword: '[redacted]' });
+});
+
 test('redactSensitive keeps numeric JSON-RPC error codes but masks string OAuth codes', () => {
   assert.equal(redactSensitive({ error: { code: -32603 } }).error.code, -32603);
   assert.equal(redactSensitive({ code: 'authz-code-abc' }).code, '[redacted]');
