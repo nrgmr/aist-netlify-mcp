@@ -36,6 +36,8 @@ export function maskToken(value: string | null | undefined): string {
 const SENSITIVE_BODY_FIELDS = new Set([
   'client_secret',
   'password',
+  'passwordValue',
+  'sitePassword',
   'code',
   'code_verifier',
   'refresh_token',
