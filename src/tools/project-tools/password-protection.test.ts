@@ -6,9 +6,9 @@ import {
   isPasswordProtected,
 } from './password-protection-values.ts';
 
-test('generateSitePassword uses a lowercase fruit and exactly three digits', () => {
+test('generateSitePassword uses five lowercase letters and exactly two digits', () => {
   for (let index = 0; index < 50; index += 1) {
-    assert.match(generateSitePassword(), /^[a-z]{6,}\d{3}$/);
+    assert.match(generateSitePassword(), /^[a-z]{5}\d{2}$/);
   }
 });
 

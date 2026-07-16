@@ -1,24 +1,14 @@
 import { randomInt } from 'node:crypto';
 
-const PASSWORD_FRUITS = [
-  'banana',
-  'cherry',
-  'orange',
-  'papaya',
-  'apricot',
-  'coconut',
-  'avocado',
-  'pumpkin',
-  'tangerine',
-  'blueberry',
-  'pineapple',
-  'nectarine',
-  'grapefruit',
-] as const;
+const LOWERCASE_LETTERS = 'abcdefghijklmnopqrstuvwxyz';
 
 export const generateSitePassword = (): string => {
-  const fruit = PASSWORD_FRUITS[randomInt(PASSWORD_FRUITS.length)];
-  return `${fruit}${randomInt(100, 1000)}`;
+  const letters = Array.from(
+    { length: 5 },
+    () => LOWERCASE_LETTERS[randomInt(LOWERCASE_LETTERS.length)],
+  ).join('');
+  const numbers = randomInt(100).toString().padStart(2, '0');
+  return `${letters}${numbers}`;
 };
 
 export const isPasswordProtected = (site: any): boolean =>
